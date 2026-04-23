@@ -554,6 +554,11 @@ pub mod ffi {
         pub fn Build(self: Pin<&mut BRepBuilderAPI_MakeWire>, progress: &Message_ProgressRange);
         pub fn IsDone(self: &BRepBuilderAPI_MakeWire) -> bool;
 
+        /// Safe Wire() call: returns null if IsDone is false or on any OCCT exception.
+        pub fn try_BRepBuilderAPI_MakeWire_Wire(
+            mw: Pin<&mut BRepBuilderAPI_MakeWire>,
+        ) -> UniquePtr<TopoDS_Wire>;
+
         type BRepBuilderAPI_MakeFace;
 
         #[cxx_name = "construct_unique"]
@@ -571,6 +576,21 @@ pub mod ffi {
         pub fn Shape(self: Pin<&mut BRepBuilderAPI_MakeFace>) -> &TopoDS_Shape;
         pub fn Build(self: Pin<&mut BRepBuilderAPI_MakeFace>, progress: &Message_ProgressRange);
         pub fn IsDone(self: &BRepBuilderAPI_MakeFace) -> bool;
+
+        /// Safe wrapper: adds an inner wire (hole) to an existing face.
+        /// Returns null on failure or OCCT exception.
+        pub fn try_AddWireToFace(
+            face: &TopoDS_Face,
+            wire: &TopoDS_Wire,
+        ) -> UniquePtr<TopoDS_Face>;
+
+        /// ShapeFix_Face::FixOrientation — auto-orient wires so outer=CCW, holes=CW.
+        /// Uses OCCT Shape Healing. Returns null on failure.
+        pub fn ShapeFix_Face_FixOrientation(face: &TopoDS_Face) -> UniquePtr<TopoDS_Face>;
+
+        /// Bulk edge classification by face adjacency.
+        /// Returns flat-packed: [n_naked, n_interior, n_non_manifold, naked_indices..., interior_indices..., nm_indices...]
+        pub fn brep_classify_edges(shape: &TopoDS_Shape) -> Vec<i32>;
 
         // BRepAdaptor
         type BRepAdaptor_Curve;
@@ -776,6 +796,27 @@ pub mod ffi {
         pub fn Build(self: Pin<&mut BRepFilletAPI_MakeChamfer>, progress: &Message_ProgressRange);
         pub fn IsDone(self: &BRepFilletAPI_MakeChamfer) -> bool;
 
+        // Safe fillet/chamfer wrappers (try-catch in C++)
+        pub fn try_BRepFilletAPI_MakeFillet_Shape(
+            fillet: Pin<&mut BRepFilletAPI_MakeFillet>,
+        ) -> UniquePtr<TopoDS_Shape>;
+
+        pub fn try_BRepFilletAPI_MakeChamfer_Shape(
+            chamfer: Pin<&mut BRepFilletAPI_MakeChamfer>,
+        ) -> UniquePtr<TopoDS_Shape>;
+
+        pub fn try_BRepFilletAPI_MakeFillet_AddEdge(
+            fillet: Pin<&mut BRepFilletAPI_MakeFillet>,
+            radius: f64,
+            edge: &TopoDS_Edge,
+        ) -> bool;
+
+        pub fn try_BRepFilletAPI_MakeChamfer_AddEdge(
+            chamfer: Pin<&mut BRepFilletAPI_MakeChamfer>,
+            distance: f64,
+            edge: &TopoDS_Edge,
+        ) -> bool;
+
         // Offset
         type BRepOffsetAPI_MakeOffset;
 
@@ -819,6 +860,27 @@ pub mod ffi {
         );
         pub fn IsDone(self: &BRepOffsetAPI_MakeThickSolid) -> bool;
 
+        // Safe BRepOffsetAPI_MakeOffsetShape wrapper — uniformly offsets a solid or shell
+        pub fn try_MakeOffsetShape(
+            shape: &TopoDS_Shape,
+            offset: f64,
+            tolerance: f64,
+        ) -> UniquePtr<TopoDS_Shape>;
+
+        // Safe MakeThickSolid wrapper (try-catch in C++)
+        pub fn try_MakeThickSolidByJoin(
+            shape: &TopoDS_Shape,
+            closing_faces: &TopTools_ListOfShape,
+            offset: f64,
+            tolerance: f64,
+        ) -> UniquePtr<TopoDS_Shape>;
+
+        // Safe MakeThickSolidBySimple wrapper — thickens open shell into solid
+        pub fn try_MakeThickSolidBySimple(
+            shape: &TopoDS_Shape,
+            offset: f64,
+        ) -> UniquePtr<TopoDS_Shape>;
+
         // Sweeps
         type BRepOffsetAPI_MakePipe;
 
@@ -828,13 +890,49 @@ pub mod ffi {
             profile: &TopoDS_Shape,
         ) -> UniquePtr<BRepOffsetAPI_MakePipe>;
 
+        pub fn IsDone(self: &BRepOffsetAPI_MakePipe) -> bool;
         pub fn Shape(self: Pin<&mut BRepOffsetAPI_MakePipe>) -> &TopoDS_Shape;
+
+        /// Interpolate a smooth B-spline wire through points (x0,y0,z0, x1,y1,z1, ...).
+        /// Returns null on failure. Used to smooth polyline rails before sweeping.
+        pub fn interpolate_points_to_wire(xyz: &[f64]) -> UniquePtr<TopoDS_Wire>;
+
+        /// Safe constructor that returns null on OCCT exception (e.g. incompatible geometry)
+        pub fn try_BRepOffsetAPI_MakePipe_ctor(
+            spine: &TopoDS_Wire,
+            profile: &TopoDS_Shape,
+        ) -> UniquePtr<BRepOffsetAPI_MakePipe>;
+
+        /// Safe Shape() — returns null if !IsDone or on any exception.
+        pub fn try_BRepOffsetAPI_MakePipe_Shape(
+            pipe: Pin<&mut BRepOffsetAPI_MakePipe>,
+        ) -> UniquePtr<TopoDS_Shape>;
+
+        /// Extract the start point and unit tangent from the first edge of a wire.
+        /// Returns true on success; fills the six f64 outputs.
+        pub fn wire_start_point_and_tangent(
+            wire: &TopoDS_Wire,
+            px: &mut f64, py: &mut f64, pz: &mut f64,
+            tx: &mut f64, ty: &mut f64, tz: &mut f64,
+        ) -> bool;
+
+        /// Safe circle wire builder — returns null on any OCCT exception.
+        pub fn try_make_circle_wire(
+            cx: f64, cy: f64, cz: f64,
+            nx: f64, ny: f64, nz: f64,
+            radius: f64,
+        ) -> UniquePtr<TopoDS_Wire>;
 
         // Sweeps with a law function
         type BRepOffsetAPI_MakePipeShell;
 
         #[cxx_name = "construct_unique"]
         pub fn BRepOffsetAPI_MakePipeShell_ctor(
+            spine: &TopoDS_Wire,
+        ) -> UniquePtr<BRepOffsetAPI_MakePipeShell>;
+
+        /// Safe MakePipeShell constructor — returns null on any OCCT exception.
+        pub fn try_BRepOffsetAPI_MakePipeShell_ctor(
             spine: &TopoDS_Wire,
         ) -> UniquePtr<BRepOffsetAPI_MakePipeShell>;
 
@@ -856,8 +954,67 @@ pub mod ffi {
         );
 
         pub fn Build(self: Pin<&mut BRepOffsetAPI_MakePipeShell>, progress: &Message_ProgressRange);
+        pub fn IsDone(self: &BRepOffsetAPI_MakePipeShell) -> bool;
         pub fn MakeSolid(self: Pin<&mut BRepOffsetAPI_MakePipeShell>) -> bool;
         pub fn Shape(self: Pin<&mut BRepOffsetAPI_MakePipeShell>) -> &TopoDS_Shape;
+
+        /// Safe wrapper: calls Build() inside a C++ try/catch; returns false on exception.
+        pub fn try_BRepOffsetAPI_MakePipeShell_Build(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+            progress: &Message_ProgressRange,
+        ) -> bool;
+
+        /// Safe wrapper: calls Add() inside a C++ try/catch; returns false on exception.
+        pub fn try_BRepOffsetAPI_MakePipeShell_Add(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+            profile: &TopoDS_Shape,
+        ) -> bool;
+
+        /// Safe Add without contact/correction — profile must already be at spine start, perpendicular to tangent.
+        pub fn try_BRepOffsetAPI_MakePipeShell_Add_raw(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+            profile: &TopoDS_Shape,
+        ) -> bool;
+
+        /// WithContact=true, WithCorrection=false: moves profile to spine start, preserves orientation.
+        pub fn try_BRepOffsetAPI_MakePipeShell_Add_contact(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+            profile: &TopoDS_Shape,
+        ) -> bool;
+
+        /// Safe wrapper: calls Shape() inside a C++ try/catch; returns null on exception.
+        pub fn try_BRepOffsetAPI_MakePipeShell_Shape(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+        ) -> UniquePtr<TopoDS_Shape>;
+
+        /// Safe wrapper: calls MakeSolid() inside a C++ try/catch; returns false on exception.
+        pub fn try_BRepOffsetAPI_MakePipeShell_MakeSolid(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+        ) -> bool;
+
+        /// Safe SetDiscreteMode wrapper: per-vertex trihedra for piecewise-linear spines.
+        /// Use this for polyline/composite-of-lines rails so the profile rotates sharply at joints.
+        pub fn try_BRepOffsetAPI_MakePipeShell_SetDiscreteMode(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+        ) -> bool;
+
+        /// Safe SetMode(Wire, bool) wrapper: sets an auxiliary spine for two-rail sweep.
+        /// The auxiliary spine constrains profile orientation/scaling evolution along the main spine.
+        pub fn try_BRepOffsetAPI_MakePipeShell_SetMode_Wire(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+            auxiliary_spine: &TopoDS_Wire,
+            curvilinear_equivalence: bool,
+        ) -> bool;
+
+        /// SetForceApproxC1(true): ask OCCT to upgrade a C0 sweep surface to C1 continuity.
+        pub fn try_BRepOffsetAPI_MakePipeShell_SetForceApproxC1(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+        );
+
+        /// SetTransitionMode(RightCorner): clean right-angle joints at non-G1 spine corners.
+        pub fn try_BRepOffsetAPI_MakePipeShell_SetTransitionMode_Right(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+        );
 
         // Lofting
         type BRepOffsetAPI_ThruSections;

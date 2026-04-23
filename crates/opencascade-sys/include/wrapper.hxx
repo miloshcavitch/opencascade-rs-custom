@@ -28,6 +28,7 @@
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -38,6 +39,8 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
+#include <ShapeFix_Face.hxx>
+#include <ShapeAnalysis.hxx>
 #include <GCE2d_MakeSegment.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -534,6 +537,442 @@ inline std::unique_ptr<gp_Pnt> Bnd_Box_CornerMin(const Bnd_Box &box) {
 inline std::unique_ptr<gp_Pnt> Bnd_Box_CornerMax(const Bnd_Box &box) {
   auto p = box.CornerMax();
   return std::unique_ptr<gp_Pnt>(new gp_Pnt(p));
+}
+
+// Interpolate a smooth B-spline wire through the given points (x0,y0,z0, x1,y1,z1, ...).
+// Returns nullptr on failure or if fewer than 2 points are given.
+// This is needed to convert a polyline rail into a smooth G2 spine for MakePipeShell,
+// so the Frenet frame is well-defined everywhere and the profile rotates correctly.
+inline std::unique_ptr<TopoDS_Wire> interpolate_points_to_wire(rust::Slice<const double> xyz) {
+  int n = static_cast<int>(xyz.size()) / 3;
+  if (n < 2) return nullptr;
+  try {
+    Handle(TColgp_HArray1OfPnt) pts = new TColgp_HArray1OfPnt(1, n);
+    for (int i = 0; i < n; i++) {
+      pts->SetValue(i + 1, gp_Pnt(xyz[3*i], xyz[3*i+1], xyz[3*i+2]));
+    }
+    GeomAPI_Interpolate interp(pts, /*IsPeriodic=*/false, /*Tolerance=*/1e-6);
+    interp.Perform();
+    if (!interp.IsDone()) return nullptr;
+    Handle(Geom_BSplineCurve) curve = interp.Curve();
+    TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(curve).Edge();
+    TopoDS_Wire wire = BRepBuilderAPI_MakeWire(edge).Wire();
+    return std::unique_ptr<TopoDS_Wire>(new TopoDS_Wire(wire));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe MakePipe wrapper: returns null unique_ptr on OCCT exception instead of aborting.
+inline std::unique_ptr<BRepOffsetAPI_MakePipe> try_BRepOffsetAPI_MakePipe_ctor(
+    const TopoDS_Wire &spine,
+    const TopoDS_Shape &profile) {
+  try {
+    return std::unique_ptr<BRepOffsetAPI_MakePipe>(
+        new BRepOffsetAPI_MakePipe(spine, profile));
+  } catch (...) {
+    return std::unique_ptr<BRepOffsetAPI_MakePipe>(nullptr);
+  }
+}
+
+// Safe MakePipe::Shape wrapper: returns null on exception (Shape() throws if !IsDone).
+inline std::unique_ptr<TopoDS_Shape> try_BRepOffsetAPI_MakePipe_Shape(
+    BRepOffsetAPI_MakePipe &pipe) {
+  try {
+    if (!pipe.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(pipe.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe wire start-tangent extractor: fills (px,py,pz, tx,ty,tz) and returns true on success.
+// Used to align the profile circle with the actual B-spline tangent (not the polyline approx).
+inline bool wire_start_point_and_tangent(
+    const TopoDS_Wire& wire,
+    double& px, double& py, double& pz,
+    double& tx, double& ty, double& tz) {
+  try {
+    TopExp_Explorer exp(wire, TopAbs_EDGE);
+    if (!exp.More()) return false;
+    TopoDS_Edge edge = TopoDS::Edge(exp.Current());
+    Standard_Real first, last;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+    if (curve.IsNull()) return false;
+    gp_Pnt pnt;
+    gp_Vec tan;
+    curve->D1(first, pnt, tan);
+    px = pnt.X(); py = pnt.Y(); pz = pnt.Z();
+    Standard_Real len = tan.Magnitude();
+    if (len < 1e-12) return false;
+    tx = tan.X()/len; ty = tan.Y()/len; tz = tan.Z()/len;
+    return true;
+  } catch (...) { return false; }
+}
+
+// Safe MakePipeShell::Build wrapper: returns false on OCCT exception instead of aborting.
+inline bool try_BRepOffsetAPI_MakePipeShell_Build(
+    BRepOffsetAPI_MakePipeShell &pipe_shell,
+    const Message_ProgressRange &progress) {
+  try {
+    pipe_shell.Build(progress);
+    return pipe_shell.IsDone();
+  } catch (...) {
+    return false;
+  }
+}
+
+// Safe Add wrapper: returns false on exception.
+// WithContact=true  → moves profile to contact the spine start
+// WithCorrection=true → rotates profile to align with the spine's Frenet frame
+inline bool try_BRepOffsetAPI_MakePipeShell_Add(
+    BRepOffsetAPI_MakePipeShell &pipe_shell,
+    const TopoDS_Shape &profile) {
+  try {
+    pipe_shell.Add(profile, /*WithContact=*/true, /*WithCorrection=*/true);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+// Safe Add wrapper WITHOUT contact/correction — profile is already pre-positioned at spine start.
+// Use this when the profile has been manually placed at the rail start, perpendicular to tangent.
+inline bool try_BRepOffsetAPI_MakePipeShell_Add_raw(
+    BRepOffsetAPI_MakePipeShell &pipe_shell,
+    const TopoDS_Shape &profile) {
+  try {
+    pipe_shell.Add(profile, /*WithContact=*/false, /*WithCorrection=*/false);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+// WithContact=true, WithCorrection=false: moves profile to spine start but preserves its orientation.
+// Use this when the user wants to control the profile's orientation but have OCCT position it on the spine.
+inline bool try_BRepOffsetAPI_MakePipeShell_Add_contact(
+    BRepOffsetAPI_MakePipeShell &pipe_shell,
+    const TopoDS_Shape &profile) {
+  try {
+    pipe_shell.Add(profile, /*WithContact=*/true, /*WithCorrection=*/false);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+// Safe Shape wrapper: returns null on exception (e.g. shape not built).
+inline std::unique_ptr<TopoDS_Shape> try_BRepOffsetAPI_MakePipeShell_Shape(
+    BRepOffsetAPI_MakePipeShell &pipe_shell) {
+  try {
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(pipe_shell.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe MakeSolid wrapper: returns false on exception.
+inline bool try_BRepOffsetAPI_MakePipeShell_MakeSolid(
+    BRepOffsetAPI_MakePipeShell &pipe_shell) {
+  try {
+    return pipe_shell.MakeSolid();
+  } catch (...) {
+    return false;
+  }
+}
+
+// Safe circle wire builder: creates a closed circle wire centered at (cx,cy,cz) with
+// normal (nx,ny,nz) and the given radius.  Returns null on any exception.
+inline std::unique_ptr<TopoDS_Wire> try_make_circle_wire(
+    double cx, double cy, double cz,
+    double nx, double ny, double nz,
+    double radius) {
+  try {
+    gp_Ax2 ax(gp_Pnt(cx, cy, cz), gp_Dir(nx, ny, nz));
+    gp_Circ circ(ax, radius);
+    TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(circ).Edge();
+    BRepBuilderAPI_MakeWire mw;
+    mw.Add(edge);
+    if (!mw.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Wire>(new TopoDS_Wire(mw.Wire()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe MakePipeShell constructor: returns null on any exception.
+inline std::unique_ptr<BRepOffsetAPI_MakePipeShell> try_BRepOffsetAPI_MakePipeShell_ctor(
+    const TopoDS_Wire &spine) {
+  try {
+    return std::unique_ptr<BRepOffsetAPI_MakePipeShell>(new BRepOffsetAPI_MakePipeShell(spine));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe SetDiscreteMode wrapper: uses per-vertex discrete trihedra instead of a continuous
+// Frenet frame. Required for piecewise-linear (polyline/composite-of-lines) spines so that
+// the profile rotates sharply at each joint rather than not rotating at all.
+inline bool try_BRepOffsetAPI_MakePipeShell_SetDiscreteMode(
+    BRepOffsetAPI_MakePipeShell &pipe_shell) {
+  try {
+    pipe_shell.SetDiscreteMode();
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+// Safe SetMode(Wire, bool) wrapper: sets an auxiliary spine wire to control
+// profile orientation/scaling evolution along the main spine (two-rail sweep).
+// curvilinear_equivalence=true uses curvilinear abscissa matching between spines.
+inline bool try_BRepOffsetAPI_MakePipeShell_SetMode_Wire(
+    BRepOffsetAPI_MakePipeShell &pipe_shell,
+    const TopoDS_Wire &auxiliary_spine,
+    bool curvilinear_equivalence) {
+  try {
+    pipe_shell.SetMode(auxiliary_spine, curvilinear_equivalence);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+// ForceApproxC1: ask OCCT to attempt a C1 surface where it would produce C0.
+inline void try_BRepOffsetAPI_MakePipeShell_SetForceApproxC1(
+    BRepOffsetAPI_MakePipeShell &pipe_shell) {
+  try { pipe_shell.SetForceApproxC1(true); } catch (...) {}
+}
+
+// RightCorner transition: produces clean right-angle joints at non-G1 spine corners
+// (polyline/segmented rails). Avoids the faceted "cut-off" look at each joint.
+inline void try_BRepOffsetAPI_MakePipeShell_SetTransitionMode_Right(
+    BRepOffsetAPI_MakePipeShell &pipe_shell) {
+  try {
+    pipe_shell.SetTransitionMode(BRepBuilderAPI_RightCorner);
+  } catch (...) {}
+}
+
+// Safe BRepBuilderAPI_MakeWire::Wire() wrapper.
+// BRepBuilderAPI_MakeWire::Wire() throws StdFail_NotDone when IsDone() is false.
+// Returns null instead of throwing.
+inline std::unique_ptr<TopoDS_Wire> try_BRepBuilderAPI_MakeWire_Wire(
+    BRepBuilderAPI_MakeWire &mw) {
+  try {
+    if (!mw.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Wire>(new TopoDS_Wire(mw.Wire()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe BRepOffsetAPI_MakeOffsetShape wrapper — uniformly offsets a solid or shell.
+// Positive offset expands, negative shrinks. Returns null on OCCT exception or failure.
+inline std::unique_ptr<TopoDS_Shape> try_MakeOffsetShape(
+    const TopoDS_Shape &shape,
+    double offset,
+    double tolerance) {
+  try {
+    BRepOffsetAPI_MakeOffsetShape offset_maker;
+    offset_maker.PerformByJoin(shape, offset, tolerance);
+    if (!offset_maker.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(offset_maker.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe MakeThickSolidByJoin wrapper: returns null on OCCT exception instead of aborting.
+inline std::unique_ptr<TopoDS_Shape> try_MakeThickSolidByJoin(
+    const TopoDS_Shape &shape,
+    const TopTools_ListOfShape &closing_faces,
+    double offset,
+    double tolerance) {
+  try {
+    BRepOffsetAPI_MakeThickSolid solid_maker;
+    solid_maker.MakeThickSolidByJoin(shape, closing_faces, offset, tolerance);
+    if (!solid_maker.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(solid_maker.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe MakeThickSolidBySimple wrapper: thickens an open shell into a solid.
+// Returns null on OCCT exception instead of aborting.
+inline std::unique_ptr<TopoDS_Shape> try_MakeThickSolidBySimple(
+    const TopoDS_Shape &shape,
+    double offset) {
+  try {
+    BRepOffsetAPI_MakeThickSolid solid_maker;
+    solid_maker.MakeThickSolidBySimple(shape, offset);
+    if (!solid_maker.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(solid_maker.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe BRepFilletAPI_MakeFillet wrapper: builds, checks IsDone, returns null on any exception.
+inline std::unique_ptr<TopoDS_Shape> try_BRepFilletAPI_MakeFillet_Shape(
+    BRepFilletAPI_MakeFillet &fillet) {
+  try {
+    fillet.Build(Message_ProgressRange());
+    if (!fillet.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(fillet.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe BRepFilletAPI_MakeChamfer wrapper: builds, checks IsDone, returns null on any exception.
+inline std::unique_ptr<TopoDS_Shape> try_BRepFilletAPI_MakeChamfer_Shape(
+    BRepFilletAPI_MakeChamfer &chamfer) {
+  try {
+    chamfer.Build(Message_ProgressRange());
+    if (!chamfer.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(chamfer.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Safe fillet add_edge: returns false on exception (e.g. degenerate edge).
+inline bool try_BRepFilletAPI_MakeFillet_AddEdge(
+    BRepFilletAPI_MakeFillet &fillet,
+    double radius,
+    const TopoDS_Edge &edge) {
+  try {
+    fillet.Add(radius, edge);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+// Safe chamfer add_edge: returns false on exception.
+inline bool try_BRepFilletAPI_MakeChamfer_AddEdge(
+    BRepFilletAPI_MakeChamfer &chamfer,
+    double distance,
+    const TopoDS_Edge &edge) {
+  try {
+    chamfer.Add(distance, edge);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+// Safe BRepBuilderAPI_MakeFace::Add wrapper — adds an inner wire (hole) to an existing face.
+// Reconstructs MakeFace from the face, calls Add(wire), returns new face or null on failure.
+// Inner wires must be REVERSED relative to the outer wire for OCCT to treat them as holes.
+// We try the wire as-given first; if that doesn't reduce the surface area, we reverse it.
+inline std::unique_ptr<TopoDS_Face> try_AddWireToFace(
+    const TopoDS_Face &face,
+    const TopoDS_Wire &wire) {
+  try {
+    // Compute original face area for comparison
+    GProp_GProps original_props;
+    BRepGProp::SurfaceProperties(face, original_props);
+    double original_area = original_props.Mass();
+
+    // Try adding wire as-is
+    BRepBuilderAPI_MakeFace mf(face);
+    mf.Add(wire);
+    if (mf.IsDone()) {
+      TopoDS_Face result = mf.Face();
+      GProp_GProps result_props;
+      BRepGProp::SurfaceProperties(result, result_props);
+      double result_area = result_props.Mass();
+      // If area decreased, the inner wire was correctly oriented as a hole
+      if (result_area < original_area - 1e-6) {
+        return std::unique_ptr<TopoDS_Face>(new TopoDS_Face(result));
+      }
+    }
+
+    // Try with reversed wire
+    TopoDS_Wire reversed = TopoDS::Wire(wire.Reversed());
+    BRepBuilderAPI_MakeFace mf2(face);
+    mf2.Add(reversed);
+    if (mf2.IsDone()) {
+      TopoDS_Face result2 = mf2.Face();
+      GProp_GProps result2_props;
+      BRepGProp::SurfaceProperties(result2, result2_props);
+      double result2_area = result2_props.Mass();
+      if (result2_area < original_area - 1e-6) {
+        return std::unique_ptr<TopoDS_Face>(new TopoDS_Face(result2));
+      }
+    }
+
+    // Fallback: return whatever the first attempt produced
+    if (mf.IsDone()) {
+      return std::unique_ptr<TopoDS_Face>(new TopoDS_Face(mf.Face()));
+    }
+    return nullptr;
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// ShapeFix_Face::FixOrientation — OCCT's Shape Healing auto-orients wires on a face.
+// Outer wire → CCW, inner wires (holes) → CW.  Reference:
+//   • OCCT docs: ShapeFix_Face Class — "If the face has several wires, they are
+//     oriented to lay one outside another (if possible)."
+//   • Forum: https://dev.opencascade.org/content/orientation-faceswires
+//   • Signed-area winding test: https://dev.opencascade.org/content/getting-wire-direction
+//     "Create a probing face with a wire on the given surface and determine its area
+//      using BRepGProp::SurfaceProperties. If area is positive the wire is CCW."
+//   • Generalized Winding Number (research):
+//     https://arxiv.org/html/2403.17371v1  (Robust Containment Queries over
+//     Collections of Rational Parametric Curves via Generalized Winding Numbers)
+//
+// Returns a new face with corrected wire orientations, or null on failure.
+inline std::unique_ptr<TopoDS_Face> ShapeFix_Face_FixOrientation(
+    const TopoDS_Face &face) {
+  try {
+    Handle(ShapeFix_Face) sff = new ShapeFix_Face(face);
+    sff->FixOrientation();
+    if (sff->Face().IsNull()) return nullptr;
+    return std::unique_ptr<TopoDS_Face>(new TopoDS_Face(sff->Face()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// Bulk edge classification by face adjacency.
+// Returns flat-packed: [n_naked, n_interior, n_non_manifold, naked_idx_0, ..., interior_idx_0, ..., nm_idx_0, ...]
+// Edge indices are in TopExp_Explorer(TopAbs_EDGE) order (same as shape.edges()).
+// Naked=1 adjacent face, Interior=2, NonManifold=3+.
+inline rust::Vec<int32_t> brep_classify_edges(const TopoDS_Shape &shape) {
+  rust::Vec<int32_t> result;
+  try {
+    TopTools_IndexedDataMapOfShapeListOfShape edge_face_map;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_face_map);
+
+    std::vector<int32_t> naked, interior, non_manifold;
+    int32_t idx = 0;
+    for (TopExp_Explorer exp(shape, TopAbs_EDGE); exp.More(); exp.Next(), idx++) {
+      int map_idx = edge_face_map.FindIndex(exp.Current());
+      int face_count = (map_idx > 0) ? edge_face_map(map_idx).Extent() : 0;
+      if (face_count <= 1) naked.push_back(idx);
+      else if (face_count == 2) interior.push_back(idx);
+      else non_manifold.push_back(idx);
+    }
+
+    result.push_back(static_cast<int32_t>(naked.size()));
+    result.push_back(static_cast<int32_t>(interior.size()));
+    result.push_back(static_cast<int32_t>(non_manifold.size()));
+    for (auto i : naked) result.push_back(i);
+    for (auto i : interior) result.push_back(i);
+    for (auto i : non_manifold) result.push_back(i);
+  } catch (...) {
+    // On failure, return empty classification
+    result.push_back(0);
+    result.push_back(0);
+    result.push_back(0);
+  }
+  return result;
 }
 
 // BRepBndLib
