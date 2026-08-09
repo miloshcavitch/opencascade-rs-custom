@@ -754,6 +754,37 @@ inline void try_BRepOffsetAPI_MakePipeShell_SetTransitionMode_Right(
   } catch (...) {}
 }
 
+// RoundCorner transition: inserts a small arc-blend at each non-G1 spine corner
+// instead of a sharp mitre. Use this when the rail has obtuse kinks (>~90°),
+// where RightCorner's mitre line projects far outside the rail bounds and
+// produces "extra ribbon" geometry shooting into space.
+inline void try_BRepOffsetAPI_MakePipeShell_SetTransitionMode_RoundCorner(
+    BRepOffsetAPI_MakePipeShell &pipe_shell) {
+  try {
+    pipe_shell.SetTransitionMode(BRepBuilderAPI_RoundCorner);
+  } catch (...) {}
+}
+
+// Fixed-binormal mode: constrains profile orientation by locking a binormal direction
+// in world space for the entire sweep. Profile keeps its global "up" axis (e.g. world Z)
+// no matter how the rail bends. Eliminates the per-segment trihedron flip that
+// SetDiscreteMode produces on polyline rails with sharp/near-180 corners (which
+// manifests as the "second half of the sweep mirrored" symptom).
+//
+// Maps to OCCT's BRepOffsetAPI_MakePipeShell::SetMode(const gp_Dir&). Returns false
+// on OCCT exception or invalid direction (zero-length vector).
+inline bool try_BRepOffsetAPI_MakePipeShell_SetMode_FixedBinormal(
+    BRepOffsetAPI_MakePipeShell &pipe_shell,
+    double bx, double by, double bz) {
+  try {
+    gp_Dir binormal(bx, by, bz);
+    pipe_shell.SetMode(binormal);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
 // Safe BRepBuilderAPI_MakeWire::Wire() wrapper.
 // BRepBuilderAPI_MakeWire::Wire() throws StdFail_NotDone when IsDone() is false.
 // Returns null instead of throwing.
@@ -978,4 +1009,14 @@ inline rust::Vec<int32_t> brep_classify_edges(const TopoDS_Shape &shape) {
 // BRepBndLib
 inline void BRepBndLib_Add(const TopoDS_Shape &shape, Bnd_Box &box, const Standard_Boolean useTriangulation) {
   BRepBndLib::Add(shape, box, useTriangulation);
+}
+
+// Tight box computed by sampling the real curves/surfaces. Unlike Add(), the
+// result does not depend on whether the shape happens to carry a triangulation:
+// Add() falls back to the B-spline control hull when there is none, which on a
+// swept branch is 22-28x the true extent.
+inline void BRepBndLib_AddOptimal(const TopoDS_Shape &shape, Bnd_Box &box,
+                                  const Standard_Boolean useTriangulation,
+                                  const Standard_Boolean useShapeTolerance) {
+  BRepBndLib::AddOptimal(shape, box, useTriangulation, useShapeTolerance);
 }

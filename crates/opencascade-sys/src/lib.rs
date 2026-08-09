@@ -1016,6 +1016,29 @@ pub mod ffi {
             pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
         );
 
+        /// SetTransitionMode(RoundCorner): inserts a small arc-blend at each non-G1 spine
+        /// corner instead of a sharp mitre. Prefer this over `_Right` when the rail has
+        /// obtuse kinks (>~90°) — RightCorner's mitre projects far outside the rail at
+        /// such angles, producing "extra ribbon" geometry.
+        pub fn try_BRepOffsetAPI_MakePipeShell_SetTransitionMode_RoundCorner(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+        );
+
+        /// Fixed-binormal SetMode wrapper. Locks the profile's binormal direction in
+        /// world space for the entire sweep — eliminates the per-segment trihedron
+        /// flip that DiscreteMode produces at sharp polyline corners. Use this for
+        /// "roadlike" sweeps where the profile should keep a constant world-space
+        /// orientation (e.g. always Z-up) regardless of rail bending.
+        ///
+        /// `(bx, by, bz)` defines the binormal direction; its length is normalised
+        /// internally. Returns false on OCCT exception or zero-length input.
+        pub fn try_BRepOffsetAPI_MakePipeShell_SetMode_FixedBinormal(
+            pipe_shell: Pin<&mut BRepOffsetAPI_MakePipeShell>,
+            bx: f64,
+            by: f64,
+            bz: f64,
+        ) -> bool;
+
         // Lofting
         type BRepOffsetAPI_ThruSections;
 
@@ -1560,6 +1583,13 @@ pub mod ffi {
         type BRepBndLib;
 
         pub fn BRepBndLib_Add(shape: &TopoDS_Shape, bb: Pin<&mut Bnd_Box>, use_triangulation: bool);
+
+        pub fn BRepBndLib_AddOptimal(
+            shape: &TopoDS_Shape,
+            bb: Pin<&mut Bnd_Box>,
+            use_triangulation: bool,
+            use_shape_tolerance: bool,
+        );
     }
 }
 

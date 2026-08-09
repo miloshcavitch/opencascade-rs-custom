@@ -43,12 +43,36 @@ impl BoundingBox {
 
 /// Compute the axis-aligned bounding box of `shape` using the `BRepBndLib`
 /// package.
+///
+/// Note that this uses the shape's triangulation when one is present, and falls
+/// back to a cheap geometric estimate when it is not — for a B-spline face that
+/// estimate is the control-polygon hull, which can be far larger than the
+/// surface. A shape therefore reports *different* boxes before and after it has
+/// been meshed. Use [`aabb_optimal`] when the answer has to be stable.
 pub fn aabb(shape: &Shape) -> BoundingBox {
     let mut bb = BoundingBox::void();
     ffi::BRepBndLib_Add(
         shape.inner.as_ref().expect("Input shape ref was null"),
         bb.inner.pin_mut(),
         true,
+    );
+    bb
+}
+
+/// Compute a tight axis-aligned bounding box by sampling the actual curves and
+/// surfaces (`BRepBndLib::AddOptimal`).
+///
+/// Triangulation is deliberately ignored, so the result depends only on the
+/// geometry and does not change once the shape has been meshed. Slower than
+/// [`aabb`] — it samples rather than reading poles — but it is the variant to
+/// reach for when the box feeds a cache key or a tolerance.
+pub fn aabb_optimal(shape: &Shape) -> BoundingBox {
+    let mut bb = BoundingBox::void();
+    ffi::BRepBndLib_AddOptimal(
+        shape.inner.as_ref().expect("Input shape ref was null"),
+        bb.inner.pin_mut(),
+        false,
+        false,
     );
     bb
 }
