@@ -1420,6 +1420,25 @@ pub mod ffi {
             deflection: f64,
         ) -> UniquePtr<BRepMesh_IncrementalMesh>;
 
+        /// The full ctor: `(theShape, theLinDeflection, isRelative, theAngDeflection,
+        /// isInParallel)`.
+        ///
+        /// The two-argument form above leaves `theAngDeflection` at OCCT's default
+        /// 0.5 rad (~28.6 degrees), which is the dominant constraint on curved
+        /// surfaces — a swept tube is meshed by angle, not by chord height, so a
+        /// caller tuning only the linear deflection is not steering the result.
+        /// There is no setter alternative: every non-default ctor of
+        /// `BRepMesh_IncrementalMesh` calls `Perform()` itself, so anything set
+        /// afterwards arrives too late to affect the mesh.
+        #[cxx_name = "construct_unique"]
+        pub fn BRepMesh_IncrementalMesh_ctor_full(
+            shape: &TopoDS_Shape,
+            lin_deflection: f64,
+            is_relative: bool,
+            ang_deflection: f64,
+            is_in_parallel: bool,
+        ) -> UniquePtr<BRepMesh_IncrementalMesh>;
+
         pub fn Shape(self: &BRepMesh_IncrementalMesh) -> &TopoDS_Shape;
         pub fn IsDone(self: &BRepMesh_IncrementalMesh) -> bool;
 

@@ -29,6 +29,52 @@ impl Mesher {
         }
     }
 
+    /// Mesh with an explicit angular deflection as well as a linear one.
+    ///
+    /// `try_new` leaves the angle at OCCT's default 0.5 rad (~28.6 degrees), which
+    /// on a curved surface is usually the binding constraint — so tightening only
+    /// `triangulation_tolerance` there buys less than it appears to. Both limits
+    /// apply at once and the mesher honours whichever is stricter.
+    ///
+    /// `angular_deflection` is in **radians**, and it is the maximum angle between
+    /// the normals at adjacent nodes. Values are clamped into OCCT's own accepted
+    /// band: it rejects a non-positive angle outright, and anything above ~1.57 rad
+    /// stops constraining anything at all.
+    ///
+    /// The two flags are fixed rather than exposed, because only one setting of
+    /// each is correct for this crate's callers:
+    ///
+    /// - `isRelative = false` — `triangulation_tolerance` is an absolute world-unit
+    ///   chord height. Turning this on would reinterpret it as a fraction of each
+    ///   edge's own length, silently changing what every existing caller's number
+    ///   means.
+    /// - `isInParallel = false` — this flag splits *one shape's faces* across
+    ///   threads. Callers meshing many shapes should parallelise at the shape level
+    ///   with this off; nesting the two is the configuration OCCT's own forum
+    ///   reports as sporadically hanging, and a swept tube has too few faces for it
+    ///   to pay anyway.
+    pub fn try_new_with_angle(
+        shape: &Shape,
+        triangulation_tolerance: f64,
+        angular_deflection: f64,
+    ) -> Result<Self, Error> {
+        let angle = angular_deflection.clamp(1.0e-3, std::f64::consts::FRAC_PI_2);
+
+        let inner = ffi::BRepMesh_IncrementalMesh_ctor_full(
+            &shape.inner,
+            triangulation_tolerance,
+            false,
+            angle,
+            false,
+        );
+
+        if inner.IsDone() {
+            Ok(Self { inner })
+        } else {
+            Err(Error::TriangulationFailed)
+        }
+    }
+
     pub fn mesh(mut self) -> Result<Mesh, Error> {
         let mut vertices = vec![];
         let mut uvs = vec![];

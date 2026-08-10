@@ -39,6 +39,29 @@ impl Face {
         Self::from_make_face(make_face)
     }
 
+    /// Adds an inner wire (hole) to this face, returning a new Face with the hole.
+    /// Returns None if the wire cannot be added (e.g. not on the same plane, OCCT error).
+    pub fn add_inner_wire(&self, wire: &Wire) -> Option<Face> {
+        let result = ffi::try_AddWireToFace(&self.inner, &wire.inner);
+        if result.is_null() {
+            None
+        } else {
+            Some(Face { inner: result })
+        }
+    }
+
+    /// Uses OCCT ShapeFix_Face to auto-orient all wires on this face.
+    /// Outer wire → CCW, inner wires (holes) → CW.
+    /// Returns None if ShapeFix fails.
+    pub fn fix_wire_orientations(&self) -> Option<Face> {
+        let result = ffi::ShapeFix_Face_FixOrientation(&self.inner);
+        if result.is_null() {
+            None
+        } else {
+            Some(Face { inner: result })
+        }
+    }
+
     pub fn from_surface(surface: &Surface) -> Self {
         const EDGE_TOLERANCE: f64 = 0.0001;
 

@@ -12,7 +12,7 @@ use glam::{dvec3, DVec3};
 use opencascade_sys::ffi;
 
 pub struct Wire {
-    pub(crate) inner: UniquePtr<ffi::TopoDS_Wire>,
+    pub inner: UniquePtr<ffi::TopoDS_Wire>,
 }
 
 impl AsRef<Wire> for Wire {
@@ -38,7 +38,7 @@ impl Default for EdgeConnection {
 }
 
 impl Wire {
-    pub(crate) fn from_wire(wire: &ffi::TopoDS_Wire) -> Self {
+    pub fn from_wire(wire: &ffi::TopoDS_Wire) -> Self {
         let inner = ffi::TopoDS_Wire_to_owned(wire);
 
         Self { inner }
@@ -77,6 +77,23 @@ impl Wire {
         }
 
         Self::from_make_wire(make_wire)
+    }
+
+    /// Like `from_edges` but returns `None` instead of panicking if `BRepBuilderAPI_MakeWire`
+    /// fails (e.g. disconnected edges, zero-length edges, or any OCCT exception).
+    pub fn try_from_edges<'a>(edges: impl IntoIterator<Item = &'a Edge>) -> Option<Self> {
+        let mut make_wire = ffi::BRepBuilderAPI_MakeWire_ctor();
+
+        for edge in edges.into_iter() {
+            make_wire.pin_mut().add_edge(&edge.inner);
+        }
+
+        let wire_ptr = ffi::try_BRepBuilderAPI_MakeWire_Wire(make_wire.pin_mut());
+        if wire_ptr.is_null() {
+            None
+        } else {
+            Some(Self::from_wire(&wire_ptr))
+        }
     }
 
     pub fn from_unordered_edges<T: AsRef<Edge>>(
@@ -190,16 +207,27 @@ impl Wire {
         Self::from_wire(result_wire)
     }
 
-    /// Sweep the wire along a path to produce a shell
-    #[must_use]
-    pub fn sweep_along(&self, path: &Wire) -> Shell {
+    /// Sweep the wire along a path to produce a shell.
+    /// Returns `None` if the OCCT operation fails (e.g. incompatible geometry).
+    pub fn try_sweep_along(&self, path: &Wire) -> Option<Shell> {
         let profile_shape = ffi::cast_wire_to_shape(&self.inner);
-        let mut make_pipe = ffi::BRepOffsetAPI_MakePipe_ctor(&path.inner, profile_shape);
+        let mut make_pipe = ffi::try_BRepOffsetAPI_MakePipe_ctor(&path.inner, profile_shape);
+
+        if make_pipe.is_null() || !make_pipe.IsDone() {
+            return None;
+        }
 
         let pipe_shape = make_pipe.pin_mut().Shape();
         let result_shell = ffi::TopoDS_cast_to_shell(pipe_shape);
 
-        Shell::from_shell(result_shell)
+        Some(Shell::from_shell(result_shell))
+    }
+
+    /// Sweep the wire along a path to produce a shell.
+    /// Panics if the OCCT operation fails. Prefer `try_sweep_along` for fallible use.
+    #[must_use]
+    pub fn sweep_along(&self, path: &Wire) -> Shell {
+        self.try_sweep_along(path).expect("sweep_along: MakePipe failed (IsDone=false)")
     }
 
     /// Sweep the wire along a path, modulated by a function, to produce a shell

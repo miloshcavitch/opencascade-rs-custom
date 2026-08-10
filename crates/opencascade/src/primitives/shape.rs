@@ -274,7 +274,7 @@ impl TorusBuilder {
 }
 
 impl Shape {
-    pub(crate) fn from_shape(shape: &ffi::TopoDS_Shape) -> Self {
+    pub fn from_shape(shape: &ffi::TopoDS_Shape) -> Self {
         let inner = ffi::TopoDS_Shape_to_owned(shape);
 
         Self { inner }
@@ -408,13 +408,34 @@ impl Shape {
         radius: f64,
         edges: impl IntoIterator<Item = T>,
     ) -> Self {
+        self.try_fillet_edges(radius, edges)
+            .expect("Fillet operation failed (OCCT Build did not complete)")
+    }
+
+    pub fn try_fillet_edges<T: AsRef<Edge>>(
+        &self,
+        radius: f64,
+        edges: impl IntoIterator<Item = T>,
+    ) -> Option<Self> {
         let mut make_fillet = ffi::BRepFilletAPI_MakeFillet_ctor(&self.inner);
 
         for edge in edges.into_iter() {
-            make_fillet.pin_mut().add_edge(radius, &edge.as_ref().inner);
+            let ok = ffi::try_BRepFilletAPI_MakeFillet_AddEdge(
+                make_fillet.pin_mut(),
+                radius,
+                &edge.as_ref().inner,
+            );
+            if !ok {
+                // Edge add threw — skip this edge silently
+            }
         }
 
-        Self::from_shape(make_fillet.pin_mut().Shape())
+        let result = ffi::try_BRepFilletAPI_MakeFillet_Shape(make_fillet.pin_mut());
+        if result.is_null() {
+            return None;
+        }
+
+        Some(Self::from_shape(&result))
     }
 
     #[must_use]
@@ -445,13 +466,34 @@ impl Shape {
         distance: f64,
         edges: impl IntoIterator<Item = T>,
     ) -> Self {
+        self.try_chamfer_edges(distance, edges)
+            .expect("Chamfer operation failed (OCCT Build did not complete)")
+    }
+
+    pub fn try_chamfer_edges<T: AsRef<Edge>>(
+        &self,
+        distance: f64,
+        edges: impl IntoIterator<Item = T>,
+    ) -> Option<Self> {
         let mut make_chamfer = ffi::BRepFilletAPI_MakeChamfer_ctor(&self.inner);
 
         for edge in edges.into_iter() {
-            make_chamfer.pin_mut().add_edge(distance, &edge.as_ref().inner);
+            let ok = ffi::try_BRepFilletAPI_MakeChamfer_AddEdge(
+                make_chamfer.pin_mut(),
+                distance,
+                &edge.as_ref().inner,
+            );
+            if !ok {
+                // Edge add threw — skip this edge silently
+            }
         }
 
-        Self::from_shape(make_chamfer.pin_mut().Shape())
+        let result = ffi::try_BRepFilletAPI_MakeChamfer_Shape(make_chamfer.pin_mut());
+        if result.is_null() {
+            return None;
+        }
+
+        Some(Self::from_shape(&result))
     }
 
     /// Performs fillet of `radius` on all edges of the shape
@@ -645,6 +687,25 @@ impl Shape {
         EdgeIterator { explorer }
     }
 
+    /// Classify edges by face adjacency: Naked (1 face), Interior (2 faces), NonManifold (3+).
+    /// Returns (naked_indices, interior_indices, non_manifold_indices) in shape.edges() order.
+    pub fn classify_edges(&self) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+        let packed = ffi::brep_classify_edges(&self.inner);
+        if packed.len() < 3 {
+            return (vec![], vec![], vec![]);
+        }
+        let n_naked = packed[0] as usize;
+        let n_interior = packed[1] as usize;
+        let n_non_manifold = packed[2] as usize;
+        let mut offset = 3;
+        let naked: Vec<usize> = packed[offset..offset + n_naked].iter().map(|&i| i as usize).collect();
+        offset += n_naked;
+        let interior: Vec<usize> = packed[offset..offset + n_interior].iter().map(|&i| i as usize).collect();
+        offset += n_interior;
+        let non_manifold: Vec<usize> = packed[offset..offset + n_non_manifold].iter().map(|&i| i as usize).collect();
+        (naked, interior, non_manifold)
+    }
+
     pub fn faces(&self) -> FaceIterator {
         let explorer = ffi::TopExp_Explorer_ctor(&self.inner, ffi::TopAbs_ShapeEnum::TopAbs_FACE);
         FaceIterator { explorer }
@@ -682,6 +743,12 @@ impl Shape {
     }
 
     #[must_use]
+    pub fn transform(&self, trsf: &UniquePtr<ffi::gp_Trsf>) -> Self {
+        let mut transform_builder = ffi::BRepBuilderAPI_Transform_ctor(&self.inner, trsf, false);
+        Self::from_shape(transform_builder.pin_mut().Shape())
+    }
+
+    #[must_use]
     pub fn hollow<T: AsRef<Face>>(
         &self,
         offset: f64,
@@ -697,6 +764,45 @@ impl Shape {
         ffi::MakeThickSolidByJoin(solid_maker.pin_mut(), &self.inner, &faces_list, offset, 0.001);
 
         Self::from_shape(solid_maker.pin_mut().Shape())
+    }
+
+    /// Uniformly offset all surfaces of a solid or shell by `offset` (positive = expand, negative = shrink).
+    /// Works on both closed solids and open shells. Returns `None` on failure.
+    pub fn try_offset_surface(&self, offset: f64) -> Option<Self> {
+        let result = ffi::try_MakeOffsetShape(&self.inner, offset, 0.001);
+        if result.is_null() {
+            return None;
+        }
+        Some(Self::from_shape(&result))
+    }
+
+    pub fn try_hollow<T: AsRef<Face>>(
+        &self,
+        offset: f64,
+        faces_to_remove: impl IntoIterator<Item = T>,
+    ) -> Option<Self> {
+        let mut faces_list = ffi::new_list_of_shape();
+
+        for face in faces_to_remove.into_iter() {
+            ffi::shape_list_append_face(faces_list.pin_mut(), &face.as_ref().inner);
+        }
+
+        let result = ffi::try_MakeThickSolidByJoin(&self.inner, &faces_list, offset, 0.001);
+        if result.is_null() {
+            return None;
+        }
+
+        Some(Self::from_shape(&result))
+    }
+
+    /// Thicken an open shell into a solid by offsetting both sides and capping edges.
+    /// Use this for open surfaces (uncapped extrusions, etc.). Returns `None` on failure.
+    pub fn try_thicken(&self, offset: f64) -> Option<Self> {
+        let result = ffi::try_MakeThickSolidBySimple(&self.inner, offset);
+        if result.is_null() {
+            return None;
+        }
+        Some(Self::from_shape(&result))
     }
 
     #[must_use]
