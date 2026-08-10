@@ -60,6 +60,9 @@
 #include <Geom_TrimmedCurve.hxx>
 #include <IGESControl_Reader.hxx>
 #include <IGESControl_Writer.hxx>
+#include <IMeshData_Status.hxx>
+#include <IMeshTools_MeshAlgoType.hxx>
+#include <IMeshTools_Parameters.hxx>
 #include <Law_Function.hxx>
 #include <Law_Interpol.hxx>
 #include <NCollection_Array1.hxx>
@@ -319,6 +322,101 @@ inline std::unique_ptr<gp_Pnt> BRep_Tool_Pnt(const TopoDS_Vertex &vertex) {
 
 inline std::unique_ptr<gp_Trsf> TopLoc_Location_Transformation(const TopLoc_Location &location) {
   return std::unique_ptr<gp_Trsf>(new gp_Trsf(location.Transformation()));
+}
+
+// IMeshTools_Parameters — the mesher's full parameter set.
+//
+// BRepMesh_IncrementalMesh's five-argument constructor reaches only four of these
+// fourteen fields (Deflection, Angle, Relative, InParallel) and leaves the rest at
+// defaults that are not all inert. Two in particular:
+//
+//   - AngleInterior and DeflectionInterior default to -1.0, and initParameters()
+//     resolves the first to *2.0 * Angle*. So a caller asking for 0.5 rad gets 0.5
+//     on the boundary edges and 1.0 across the face interior.
+//   - MinSize defaults to 0.1 * min(Deflection, DeflectionInterior), a floor on
+//     triangle edge length. It is the kernel's own guard against amplification on
+//     distorted surfaces, and the only one that does not scale with the whole shape.
+//
+// Bound as an opaque type with one setter per field rather than a single positional
+// constructor. Nine consecutive Standard_Real / Standard_Boolean arguments transpose
+// silently, and the failure would arrive as a subtly wrong mesh rather than as a
+// compile error. Field order is not part of this API.
+inline void IMeshTools_Parameters_set_deflection(IMeshTools_Parameters &params, const Standard_Real value) {
+  params.Deflection = value;
+}
+
+inline void IMeshTools_Parameters_set_angle(IMeshTools_Parameters &params, const Standard_Real value) {
+  params.Angle = value;
+}
+
+// Negative leaves it to initParameters(), which copies Deflection.
+inline void IMeshTools_Parameters_set_deflection_interior(IMeshTools_Parameters &params,
+                                                          const Standard_Real value) {
+  params.DeflectionInterior = value;
+}
+
+// Negative leaves it to initParameters(), which uses 2.0 * Angle.
+inline void IMeshTools_Parameters_set_angle_interior(IMeshTools_Parameters &params, const Standard_Real value) {
+  params.AngleInterior = value;
+}
+
+// Negative leaves it to initParameters(), which uses
+// IMeshTools_Parameters::RelMinSize() * min(Deflection, DeflectionInterior).
+inline void IMeshTools_Parameters_set_min_size(IMeshTools_Parameters &params, const Standard_Real value) {
+  params.MinSize = value;
+}
+
+inline void IMeshTools_Parameters_set_adjust_min_size(IMeshTools_Parameters &params, const Standard_Boolean value) {
+  params.AdjustMinSize = value;
+}
+
+inline void IMeshTools_Parameters_set_control_surface_deflection(IMeshTools_Parameters &params,
+                                                                 const Standard_Boolean value) {
+  params.ControlSurfaceDeflection = value;
+}
+
+// Controls the direction of the mesher's reuse test. BRepMesh_Deflection::IsConsistent
+// is
+//
+//   current < (1 + ratio) * required  &&  (!allowDecrease || current > (1 - ratio) * required)
+//
+// so with this off — OCCT's default — a stored triangulation finer than the request
+// counts as consistent and is kept, and a *loosening* request is silently ignored.
+// Turning it on makes the test a band in both directions. It does not make an angular
+// change observable: that comparison is on linear deflection alone, and
+// Poly_Triangulation stores no angle. Dropping a stale triangulation entirely is still
+// BRepTools_Clean's job.
+inline void IMeshTools_Parameters_set_allow_quality_decrease(IMeshTools_Parameters &params,
+                                                             const Standard_Boolean value) {
+  params.AllowQualityDecrease = value;
+}
+
+// Takes the raw enumerator rather than a bridged enum: IMeshTools_MeshAlgoType is an
+// unscoped enum with no fixed underlying type, so its size is implementation-defined
+// and a cxx extern-enum binding would rest on a static assert about it. -1 DEFAULT,
+// 0 Watson, 1 Delabella; anything else is clamped to DEFAULT rather than cast into an
+// enumerator that does not exist.
+inline void IMeshTools_Parameters_set_mesh_algo(IMeshTools_Parameters &params, const int value) {
+  switch (value) {
+    case 0:
+      params.MeshAlgo = IMeshTools_MeshAlgoType_Watson;
+      break;
+    case 1:
+      params.MeshAlgo = IMeshTools_MeshAlgoType_Delabella;
+      break;
+    default:
+      params.MeshAlgo = IMeshTools_MeshAlgoType_DEFAULT;
+      break;
+  }
+}
+
+// The three-argument constructor, taking its Message_ProgressRange default. Like every
+// other non-default BRepMesh_IncrementalMesh constructor it calls Perform() itself, so
+// the parameters must be complete before this is called — nothing set afterwards
+// reaches the mesh.
+inline std::unique_ptr<BRepMesh_IncrementalMesh>
+BRepMesh_IncrementalMesh_ctor_params(const TopoDS_Shape &shape, const IMeshTools_Parameters &params) {
+  return std::unique_ptr<BRepMesh_IncrementalMesh>(new BRepMesh_IncrementalMesh(shape, params));
 }
 
 inline std::unique_ptr<HandlePoly_Triangulation>

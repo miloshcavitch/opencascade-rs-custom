@@ -1439,8 +1439,92 @@ pub mod ffi {
             is_in_parallel: bool,
         ) -> UniquePtr<BRepMesh_IncrementalMesh>;
 
+        /// The mesher's full parameter set, as an opaque handle plus one setter per
+        /// field.
+        ///
+        /// `BRepMesh_IncrementalMesh_ctor_full` above reaches four of these fourteen
+        /// fields. Of the ten it does not, two are not inert: `AngleInterior` resolves
+        /// to **twice** `Angle` when left alone, so a caller asking for 0.5 rad meshes
+        /// face interiors at 1.0; and `MinSize` is a floor on triangle edge length,
+        /// the kernel's own guard against amplification on a distorted surface.
+        ///
+        /// Constructed default and mutated field by field rather than through a
+        /// positional constructor — nine `f64`/`bool` arguments in a row transpose
+        /// silently, and the result would be a subtly wrong mesh rather than a
+        /// compile error. See the wrapper for what each field's sentinel means.
+        type IMeshTools_Parameters;
+
+        #[cxx_name = "construct_unique"]
+        pub fn IMeshTools_Parameters_ctor() -> UniquePtr<IMeshTools_Parameters>;
+
+        pub fn IMeshTools_Parameters_set_deflection(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: f64,
+        );
+        pub fn IMeshTools_Parameters_set_angle(params: Pin<&mut IMeshTools_Parameters>, value: f64);
+        /// Negative defers to the kernel, which copies `Deflection`.
+        pub fn IMeshTools_Parameters_set_deflection_interior(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: f64,
+        );
+        /// Negative defers to the kernel, which uses `2.0 * Angle`.
+        pub fn IMeshTools_Parameters_set_angle_interior(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: f64,
+        );
+        /// Negative defers to the kernel, which uses
+        /// `0.1 * min(Deflection, DeflectionInterior)`.
+        pub fn IMeshTools_Parameters_set_min_size(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: f64,
+        );
+        pub fn IMeshTools_Parameters_set_adjust_min_size(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: bool,
+        );
+        pub fn IMeshTools_Parameters_set_control_surface_deflection(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: bool,
+        );
+        /// Whether a *coarsening* request is honoured. Off — OCCT's default — a stored
+        /// triangulation finer than the request is reused and the request is silently
+        /// dropped. This does not make an angular change observable; that is
+        /// `BRepTools_Clean`'s job.
+        pub fn IMeshTools_Parameters_set_allow_quality_decrease(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: bool,
+        );
+        /// `-1` DEFAULT, `0` Watson, `1` Delabella. Anything else is read as DEFAULT.
+        /// Passed as a raw `i32` because `IMeshTools_MeshAlgoType` is an unscoped enum
+        /// with an implementation-defined underlying type.
+        pub fn IMeshTools_Parameters_set_mesh_algo(
+            params: Pin<&mut IMeshTools_Parameters>,
+            value: i32,
+        );
+
+        /// Mesh with the full parameter set. Calls `Perform()` itself, like every other
+        /// non-default constructor here.
+        pub fn BRepMesh_IncrementalMesh_ctor_params(
+            shape: &TopoDS_Shape,
+            params: &IMeshTools_Parameters,
+        ) -> UniquePtr<BRepMesh_IncrementalMesh>;
+
         pub fn Shape(self: &BRepMesh_IncrementalMesh) -> &TopoDS_Shape;
         pub fn IsDone(self: &BRepMesh_IncrementalMesh) -> bool;
+
+        /// `IMeshData_Status` bits accumulated across every face and wire of the run.
+        ///
+        /// The mesher already knows things the caller otherwise has to infer:
+        /// `0x4 Failure` — it could not mesh some faces, which on this crate's
+        /// extraction path discards the whole shape — and `0x80 Reused` — it kept an
+        /// existing triangulation, which is otherwise only visible as a suspiciously
+        /// fast mesh beside a full-cost extraction. Also `0x1 OpenWire`,
+        /// `0x2 SelfIntersectingWire`, `0x10 UnorientedWire`, `0x20 TooFewPoints`,
+        /// `0x40 Outdated`, `0x8 ReMesh`, `0x100 UserBreak`.
+        pub fn GetStatusFlags(self: &BRepMesh_IncrementalMesh) -> i32;
+
+        /// Whether this run actually changed any triangulation.
+        pub fn IsModified(self: &BRepMesh_IncrementalMesh) -> bool;
 
         type TopLoc_Location;
         #[cxx_name = "construct_unique"]
