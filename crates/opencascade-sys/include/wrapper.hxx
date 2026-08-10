@@ -469,6 +469,33 @@ inline std::unique_ptr<TopoDS_Wire> outer_wire(const TopoDS_Face &face) {
   return std::unique_ptr<TopoDS_Wire>(new TopoDS_Wire(BRepTools::OuterWire(face)));
 }
 
+// Drops every triangulation the shape is carrying: the Poly_Triangulation on each
+// face, and the Poly_PolygonOnTriangulation / Poly_Polygon3D on each edge. The next
+// mesher call then has nothing to reuse and meshes from the surfaces.
+//
+// This is not a tidy-up, it is what makes a meshing parameter observable.
+// BRepMesh_IncrementalMesh is incremental as advertised: it keeps any face whose
+// stored triangulation already satisfies the request, and that test
+// (BRepMesh_Deflection::IsConsistent) reads the LINEAR deflection alone, comparing
+// current < 1.1 * required. So a changed angular deflection can never trigger a
+// re-mesh — Poly_Triangulation does not store an angle to compare against — and a
+// linear deflection that moved by less than a ninth is ignored too. Without this
+// call, tightening a parameter silently returns the old mesh.
+//
+// Clean takes a const reference and mutates through it. That is OCCT's own
+// signature, not a cast here: the triangulation lives in the shared TShape, which
+// the handle only points at. It follows that this is a data race if two threads
+// hold the same shape — callers must keep one shape on one thread.
+inline void BRepTools_Clean(const TopoDS_Shape &shape) {
+  try {
+    BRepTools::Clean(shape);
+  } catch (...) {
+    // Nothing to report and nothing to undo: a shape that could not be cleaned
+    // still meshes, it just may reuse what it was already carrying. The catch is
+    // here so an OCCT exception cannot unwind across the FFI boundary.
+  }
+}
+
 // Collections
 inline void map_shapes(const TopoDS_Shape &S, const TopAbs_ShapeEnum T, TopTools_IndexedMapOfShape &M) {
   TopExp::MapShapes(S, T, M);

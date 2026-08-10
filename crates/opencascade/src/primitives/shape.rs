@@ -748,6 +748,43 @@ impl Shape {
         Self::from_shape(transform_builder.pin_mut().Shape())
     }
 
+    /// Discards any mesh this shape is carrying, so the next [`crate::mesh::Mesher`]
+    /// builds one from the surfaces instead of reusing what is already there.
+    ///
+    /// Call this before re-meshing at changed parameters. `BRepMesh_IncrementalMesh`
+    /// keeps any face whose stored triangulation already satisfies the request, and
+    /// that test compares linear deflections only — `current < 1.1 * required`. Two
+    /// things follow, and both are silent:
+    ///
+    /// - a changed **angular** deflection never re-meshes anything, because a
+    ///   triangulation stores no angle to be compared against;
+    /// - a linear deflection that tightened by less than a ninth is treated as
+    ///   already satisfied.
+    ///
+    /// So without this call, "mesh finer" can legitimately hand back the coarse mesh
+    /// and report success. The tell is wall time: a near-zero mesh beside a full-cost
+    /// extraction is reuse, not speed.
+    ///
+    /// # Cost, and why this is not the default
+    ///
+    /// Cleaning throws away work. Meshing the same shape twice at the *same*
+    /// parameters is meant to be nearly free, and calling this first makes it cost
+    /// full price. Call it when the parameters have actually changed — typically on a
+    /// caller-side cache miss, where a full mesh is happening regardless.
+    ///
+    /// # Panics / threading
+    ///
+    /// Takes `&self` but mutates the shared `TShape` — the triangulation lives there,
+    /// not in this handle, so every copy of this shape is affected and any concurrent
+    /// reader of them is a data race. Same constraint the mesher itself imposes.
+    ///
+    /// Note that a cleaned shape also answers [`crate::bounding_box::aabb`]
+    /// differently, since that falls back to the control hull with no triangulation
+    /// present. Use `aabb_optimal` where the answer has to be stable.
+    pub fn clean_triangulation(&self) {
+        ffi::BRepTools_Clean(&self.inner);
+    }
+
     #[must_use]
     pub fn hollow<T: AsRef<Face>>(
         &self,

@@ -1554,6 +1554,16 @@ pub mod ffi {
         // BRepTools
         pub fn outer_wire(face: &TopoDS_Face) -> UniquePtr<TopoDS_Wire>;
 
+        /// Drop every triangulation and polygon hanging off `shape`, so the next
+        /// `BRepMesh_IncrementalMesh` has nothing to reuse.
+        ///
+        /// Required before re-meshing at different parameters: the mesher's reuse
+        /// test reads the linear deflection only, so a changed *angular* deflection
+        /// otherwise returns the old mesh unchanged. See the wrapper for the exact
+        /// rule, and note that this mutates shared `TShape` data through a shared
+        /// reference — one shape must belong to one thread.
+        pub fn BRepTools_Clean(shape: &TopoDS_Shape);
+
         // Cleaning
         type ShapeUpgrade_UnifySameDomain;
 
