@@ -54,6 +54,31 @@ pub mod ffi {
         GeomAbs_OtherCurve,
     }
 
+    /// The eleven surface types `BRepAdaptor_Surface::GetType` can report, in OCCT's
+    /// own declaration order — `GeomAbs_SurfaceType.hxx`. The order is the ABI here,
+    /// not a convention: `#[repr(u32)]` means a variant inserted anywhere but the end
+    /// silently renumbers every one after it.
+    ///
+    /// The last variant is the interesting one. `GeomAbs_OtherSurface` is what OCCT
+    /// reports for a surface none of the other ten describe, and any strategy that
+    /// converts surfaces to B-splines has to know whether the shapes in hand actually
+    /// contain one.
+    #[derive(Debug)]
+    #[repr(u32)]
+    pub enum GeomAbs_SurfaceType {
+        GeomAbs_Plane,
+        GeomAbs_Cylinder,
+        GeomAbs_Cone,
+        GeomAbs_Sphere,
+        GeomAbs_Torus,
+        GeomAbs_BezierSurface,
+        GeomAbs_BSplineSurface,
+        GeomAbs_SurfaceOfRevolution,
+        GeomAbs_SurfaceOfExtrusion,
+        GeomAbs_OffsetSurface,
+        GeomAbs_OtherSurface,
+    }
+
     #[repr(u32)]
     #[derive(Debug)]
     pub enum GeomAbs_JoinType {
@@ -355,6 +380,13 @@ pub mod ffi {
         // Edge types
         type GeomAbs_CurveType;
 
+        // Face types. Declared here as well as in the shared-enum block above, which is
+        // what makes cxx treat it as a C++-defined enum and emit static_asserts tying
+        // each variant to OCCT's own discriminant — so a transcription error in the
+        // eleven variants is a build failure rather than a face silently reported as
+        // the wrong type.
+        type GeomAbs_SurfaceType;
+
         // Segments
         type GC_MakeSegment;
         type GCE2d_MakeSegment;
@@ -601,6 +633,21 @@ pub mod ffi {
         pub fn LastParameter(self: &BRepAdaptor_Curve) -> f64;
         pub fn BRepAdaptor_Curve_value(curve: &BRepAdaptor_Curve, u: f64) -> UniquePtr<gp_Pnt>;
         pub fn GetType(self: &BRepAdaptor_Curve) -> GeomAbs_CurveType;
+
+        /// The surface half of the adaptor pair. Bound for the same reason
+        /// `BRepAdaptor_Curve` was: it is the cheap, canonical way to ask a topological
+        /// entity what geometry is under it, without reaching for the `Geom_Surface`
+        /// handle and its dynamic type.
+        ///
+        /// Note that the adaptor answers about the surface **as the face sees it**. A
+        /// face built on a trimmed or rectangular-trimmed surface reports the basis
+        /// surface's type, which is what a census of "what would a converter have to
+        /// handle" wants to know.
+        type BRepAdaptor_Surface;
+
+        #[cxx_name = "construct_unique"]
+        pub fn BRepAdaptor_Surface_ctor(face: &TopoDS_Face) -> UniquePtr<BRepAdaptor_Surface>;
+        pub fn GetType(self: &BRepAdaptor_Surface) -> GeomAbs_SurfaceType;
 
         // Primitives
         type BRepPrimAPI_MakePrism;

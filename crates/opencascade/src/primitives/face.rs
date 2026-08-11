@@ -11,6 +11,49 @@ use cxx::UniquePtr;
 use glam::{dvec3, DVec3};
 use opencascade_sys::ffi;
 
+/// What geometry sits under a face — the surface counterpart of [`EdgeType`].
+///
+/// [`EdgeType`]: crate::primitives::EdgeType
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FaceType {
+    Plane,
+    Cylinder,
+    Cone,
+    Sphere,
+    Torus,
+    BezierSurface,
+    BSplineSurface,
+    SurfaceOfRevolution,
+    SurfaceOfExtrusion,
+    OffsetSurface,
+    OtherSurface,
+}
+
+impl From<ffi::GeomAbs_SurfaceType> for FaceType {
+    fn from(surface_type: ffi::GeomAbs_SurfaceType) -> Self {
+        match surface_type {
+            ffi::GeomAbs_SurfaceType::GeomAbs_Plane => Self::Plane,
+            ffi::GeomAbs_SurfaceType::GeomAbs_Cylinder => Self::Cylinder,
+            ffi::GeomAbs_SurfaceType::GeomAbs_Cone => Self::Cone,
+            ffi::GeomAbs_SurfaceType::GeomAbs_Sphere => Self::Sphere,
+            ffi::GeomAbs_SurfaceType::GeomAbs_Torus => Self::Torus,
+            ffi::GeomAbs_SurfaceType::GeomAbs_BezierSurface => Self::BezierSurface,
+            ffi::GeomAbs_SurfaceType::GeomAbs_BSplineSurface => Self::BSplineSurface,
+            ffi::GeomAbs_SurfaceType::GeomAbs_SurfaceOfRevolution => Self::SurfaceOfRevolution,
+            ffi::GeomAbs_SurfaceType::GeomAbs_SurfaceOfExtrusion => Self::SurfaceOfExtrusion,
+            ffi::GeomAbs_SurfaceType::GeomAbs_OffsetSurface => Self::OffsetSurface,
+            // Deliberately not `EdgeType`'s `panic!`. This is reached by walking every
+            // face of every shape in a model, on a mesher worker, and a census that
+            // aborts on the one shape it was written to characterise is worse than a
+            // census that mislabels it. Unreachable in practice: cxx static_asserts the
+            // eleven discriminants against OCCT's header and `occt-sys` is pinned, so
+            // this arm only opens if OCCT itself grows a twelfth surface type — at
+            // which point the count of `OtherSurface` is the thing to distrust.
+            _ => Self::OtherSurface,
+        }
+    }
+}
+
 pub struct Face {
     pub(crate) inner: UniquePtr<ffi::TopoDS_Face>,
 }
@@ -26,6 +69,18 @@ impl Face {
         let inner = ffi::TopoDS_Face_to_owned(face);
 
         Self { inner }
+    }
+
+    /// What kind of surface this face lies on.
+    ///
+    /// The mirror of [`Edge::edge_type`], and cheap for the same reason: the adaptor
+    /// reads the type off the face's surface handle without evaluating anything.
+    ///
+    /// [`Edge::edge_type`]: crate::primitives::Edge::edge_type
+    pub fn surface_type(&self) -> FaceType {
+        let surface = ffi::BRepAdaptor_Surface_ctor(&self.inner);
+
+        FaceType::from(surface.GetType())
     }
 
     fn from_make_face(make_face: UniquePtr<ffi::BRepBuilderAPI_MakeFace>) -> Self {
@@ -539,6 +594,44 @@ mod tests {
             (face.surface_area() - 35.0).abs() <= 0.00001,
             "Expected surface_area() to be ~35.0, was actually {}",
             face.surface_area()
+        );
+    }
+
+    /// A cylinder is the cheapest shape that proves the binding reads a real
+    /// discriminant rather than always returning variant zero: it has exactly three
+    /// faces and they are not all the same type. Two `Plane` caps and one `Cylinder`
+    /// side — and `Plane` being variant 0, the side is what shows the value is read.
+    #[test]
+    fn cylinder_face_types() {
+        let shape = Shape::cylinder_radius_height(2.0, 5.0);
+
+        let mut planes = 0;
+        let mut cylinders = 0;
+        let mut other = vec![];
+        for face in shape.faces() {
+            match face.surface_type() {
+                FaceType::Plane => planes += 1,
+                FaceType::Cylinder => cylinders += 1,
+                t => other.push(t),
+            }
+        }
+
+        assert_eq!(planes, 2, "expected two planar caps");
+        assert_eq!(cylinders, 1, "expected one cylindrical side");
+        assert!(other.is_empty(), "unexpected face types: {other:?}");
+    }
+
+    /// The variant most likely to be wrong if the eleven were transcribed out of order:
+    /// `BSplineSurface` sits at index 6, far enough in that an off-by-one shows up as
+    /// `BezierSurface` or `SurfaceOfRevolution` rather than as a crash.
+    #[test]
+    fn sphere_face_type() {
+        let shape = Shape::sphere(3.0).build();
+
+        let types: Vec<_> = shape.faces().map(|f| f.surface_type()).collect();
+        assert!(
+            types.iter().all(|t| *t == FaceType::Sphere),
+            "expected every face of a sphere to be Sphere, got {types:?}"
         );
     }
 }
