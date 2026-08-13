@@ -14,6 +14,7 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepFeat_MakeCylindricalHole.hxx>
 #include <BRepFeat_MakeDPrism.hxx>
@@ -40,6 +41,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeAnalysis.hxx>
 #include <GCE2d_MakeSegment.hxx>
@@ -53,6 +55,7 @@
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_JoinType.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
@@ -1145,4 +1148,317 @@ inline void BRepBndLib_AddOptimal(const TopoDS_Shape &shape, Bnd_Box &box,
                                   const Standard_Boolean useTriangulation,
                                   const Standard_Boolean useShapeTolerance) {
   BRepBndLib::AddOptimal(shape, box, useTriangulation, useShapeTolerance);
+}
+
+// ---------------------------------------------------------------------------
+// NURBS readback — turning a face back into the numbers that define it
+// ---------------------------------------------------------------------------
+//
+// Everything above this line was built to *author* geometry (construct a Bezier
+// surface, build a face from it) or to *mesh* it. Nothing was built to read a
+// surface's own definition back out, which is what an evaluator outside OCCT needs.
+//
+// Two rules shape this whole section:
+//
+// 1. **Convert the face, not the surface.** The obvious move is
+//    BRep_Tool::Surface(face) followed by GeomConvert::SurfaceToBSplineSurface. It is
+//    wrong, and quietly: the conversion may reparametrize, while BRepTools::UVBounds
+//    and the p-curves still speak the *original* surface's parameters. The surface,
+//    its domain and its trim loops would then be three answers to three different
+//    questions. BRepBuilderAPI_NurbsConvert rebuilds the face — surface and p-curves
+//    together — so reading all three off the converted face is self-consistent by
+//    construction.
+//
+// 2. **Bulk arrays cross once.** Poles are the only O(n) quantity here, and a
+//    per-pole call would mean one heap allocation and one FFI hop per control point
+//    per face. They come back flat-packed, the same idiom brep_classify_edges uses.
+//    The scalars stay as named accessors: nine consecutive numbers as positional
+//    arguments transpose silently and fail as a wrong *surface*, not a compile error.
+//
+// Every entry point here catches. An OCCT exception crossing this boundary is a
+// SIGABRT, not an Err.
+
+typedef opencascade::handle<Geom_BSplineSurface> HandleGeomBSplineSurface;
+
+// The face rebuilt on B-spline geometry, or null. Null is a real answer — a face
+// OCCT declines to convert is one this pipeline cannot render, and the caller falls
+// back to the mesher rather than guessing.
+inline std::unique_ptr<TopoDS_Face> nurbs_convert_face(const TopoDS_Face &face) {
+  try {
+    BRepBuilderAPI_NurbsConvert converter(face, Standard_True);
+    const TopoDS_Shape &out = converter.Shape();
+    if (out.IsNull() || out.ShapeType() != TopAbs_FACE) {
+      return std::unique_ptr<TopoDS_Face>();
+    }
+    return std::unique_ptr<TopoDS_Face>(new TopoDS_Face(TopoDS::Face(out)));
+  } catch (...) {
+    return std::unique_ptr<TopoDS_Face>();
+  }
+}
+
+// The B-spline surface under a face, or null.
+//
+// Expects a face that has already been through nurbs_convert_face; the DownCast is
+// what enforces that. Deliberately does not convert as a fallback, because a
+// conversion here would produce a surface whose parameters the caller's UV bounds and
+// p-curves do not share -- see rule 1 above.
+inline std::unique_ptr<HandleGeomBSplineSurface> bspline_surface_of_face(const TopoDS_Face &face) {
+  try {
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    if (surface.IsNull()) {
+      return std::unique_ptr<HandleGeomBSplineSurface>();
+    }
+    Handle(Geom_BSplineSurface) bspline = Handle(Geom_BSplineSurface)::DownCast(surface);
+    if (bspline.IsNull()) {
+      return std::unique_ptr<HandleGeomBSplineSurface>();
+    }
+    return std::unique_ptr<HandleGeomBSplineSurface>(
+        new opencascade::handle<Geom_BSplineSurface>(bspline));
+  } catch (...) {
+    return std::unique_ptr<HandleGeomBSplineSurface>();
+  }
+}
+
+inline bool HandleGeomBSplineSurface_IsNull(const HandleGeomBSplineSurface &surface) {
+  return surface.IsNull();
+}
+
+// Scalars, named rather than packed. See rule 2.
+inline int32_t bspline_u_degree(const HandleGeomBSplineSurface &s) { return s->UDegree(); }
+inline int32_t bspline_v_degree(const HandleGeomBSplineSurface &s) { return s->VDegree(); }
+inline int32_t bspline_nb_u_poles(const HandleGeomBSplineSurface &s) { return s->NbUPoles(); }
+inline int32_t bspline_nb_v_poles(const HandleGeomBSplineSurface &s) { return s->NbVPoles(); }
+inline int32_t bspline_nb_u_knots(const HandleGeomBSplineSurface &s) { return s->NbUKnots(); }
+inline int32_t bspline_nb_v_knots(const HandleGeomBSplineSurface &s) { return s->NbVKnots(); }
+inline bool bspline_is_u_periodic(const HandleGeomBSplineSurface &s) { return s->IsUPeriodic(); }
+inline bool bspline_is_v_periodic(const HandleGeomBSplineSurface &s) { return s->IsVPeriodic(); }
+
+// Whether the weights mean anything. A polynomial surface still answers Weight(i,j)
+// -- with 1.0 -- so this is not an optimisation: it is the difference between reading
+// a value and reading a placeholder, and the consumer stores None rather than a vector
+// of ones precisely so the two cannot be confused later.
+inline bool bspline_is_u_rational(const HandleGeomBSplineSurface &s) { return s->IsURational(); }
+inline bool bspline_is_v_rational(const HandleGeomBSplineSurface &s) { return s->IsVRational(); }
+
+// NbUPoles * NbVPoles * 4 doubles: x, y, z, w per pole, **u-major** -- pole(i,j) is at
+// (i * NbVPoles + j) * 4. OCCT's own arrays are 1-based and column-major-ish by
+// convention; the +1s and the ordering are settled here, once, rather than at every
+// call site. Empty on failure.
+//
+// The weight is always written. On a polynomial surface it is OCCT's 1.0, and the flag
+// above is what says whether to believe it.
+inline rust::Vec<double> bspline_poles(const HandleGeomBSplineSurface &s) {
+  rust::Vec<double> out;
+  try {
+    const Standard_Integer nu = s->NbUPoles();
+    const Standard_Integer nv = s->NbVPoles();
+    out.reserve(static_cast<size_t>(nu) * static_cast<size_t>(nv) * 4);
+    for (Standard_Integer i = 1; i <= nu; ++i) {
+      for (Standard_Integer j = 1; j <= nv; ++j) {
+        const gp_Pnt p = s->Pole(i, j);
+        out.push_back(p.X());
+        out.push_back(p.Y());
+        out.push_back(p.Z());
+        out.push_back(s->Weight(i, j));
+      }
+    }
+  } catch (...) {
+    rust::Vec<double> empty;
+    return empty;
+  }
+  return out;
+}
+
+// The **distinct** knots, not the flat sequence. OCCT stores knots compressed, and the
+// multiplicities below are the other half; expanding them is the consumer's job and is
+// the single most dangerous step in this whole readback -- an off-by-one multiplicity
+// produces a surface that is subtly wrong near every interior knot and looks right.
+inline rust::Vec<double> bspline_u_knots(const HandleGeomBSplineSurface &s) {
+  rust::Vec<double> out;
+  try {
+    const Standard_Integer n = s->NbUKnots();
+    out.reserve(static_cast<size_t>(n));
+    for (Standard_Integer i = 1; i <= n; ++i) out.push_back(s->UKnot(i));
+  } catch (...) {
+    rust::Vec<double> empty;
+    return empty;
+  }
+  return out;
+}
+
+inline rust::Vec<double> bspline_v_knots(const HandleGeomBSplineSurface &s) {
+  rust::Vec<double> out;
+  try {
+    const Standard_Integer n = s->NbVKnots();
+    out.reserve(static_cast<size_t>(n));
+    for (Standard_Integer i = 1; i <= n; ++i) out.push_back(s->VKnot(i));
+  } catch (...) {
+    rust::Vec<double> empty;
+    return empty;
+  }
+  return out;
+}
+
+inline rust::Vec<int32_t> bspline_u_mults(const HandleGeomBSplineSurface &s) {
+  rust::Vec<int32_t> out;
+  try {
+    const Standard_Integer n = s->NbUKnots();
+    out.reserve(static_cast<size_t>(n));
+    for (Standard_Integer i = 1; i <= n; ++i) out.push_back(s->UMultiplicity(i));
+  } catch (...) {
+    rust::Vec<int32_t> empty;
+    return empty;
+  }
+  return out;
+}
+
+inline rust::Vec<int32_t> bspline_v_mults(const HandleGeomBSplineSurface &s) {
+  rust::Vec<int32_t> out;
+  try {
+    const Standard_Integer n = s->NbVKnots();
+    out.reserve(static_cast<size_t>(n));
+    for (Standard_Integer i = 1; i <= n; ++i) out.push_back(s->VMultiplicity(i));
+  } catch (...) {
+    rust::Vec<int32_t> empty;
+    return empty;
+  }
+  return out;
+}
+
+// [u_min, u_max, v_min, v_max] for the face's own domain, or empty.
+//
+// Not the surface's natural bounds: a face is a *bounded* region of a surface, and on
+// a plane the surface's own bounds are infinite. This is the sampling rectangle.
+inline rust::Vec<double> face_uv_bounds(const TopoDS_Face &face) {
+  rust::Vec<double> out;
+  try {
+    Standard_Real u_min = 0.0, u_max = 0.0, v_min = 0.0, v_max = 0.0;
+    BRepTools::UVBounds(face, u_min, u_max, v_min, v_max);
+    out.push_back(u_min);
+    out.push_back(u_max);
+    out.push_back(v_min);
+    out.push_back(v_max);
+  } catch (...) {
+    rust::Vec<double> empty;
+    return empty;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// The oracle: OCCT evaluating the same surface
+// ---------------------------------------------------------------------------
+//
+// Nothing in the readback above is self-checking. A transposed pole grid, a knot array
+// off by one multiplicity, a Weight(i,j) read (j,i) -- each produces a surface that is
+// smooth, plausible and wrong, and the first thing that would notice is a picture.
+//
+// These two let a test ask OCCT what the answer is, at f64, so a disagreement means the
+// readback is wrong because it cannot mean anything else. Deliberately the *surface*
+// adaptor and not BRep_Tool::Triangulation: a triangulation is deflection-limited, so
+// disagreements against it are dominated by the mesher's tolerance rather than by
+// anyone's arithmetic, and the threshold ends up tuned until it passes.
+
+// Null on failure, which an out-of-domain parameter is a real way to reach. The caller
+// gets an Option rather than a process abort.
+inline std::unique_ptr<gp_Pnt> BRepAdaptor_Surface_value(const BRepAdaptor_Surface &surface, double u,
+                                                         double v) {
+  try {
+    return std::unique_ptr<gp_Pnt>(new gp_Pnt(surface.Value(u, v)));
+  } catch (...) {
+    return std::unique_ptr<gp_Pnt>();
+  }
+}
+
+// 9 doubles: position, dS/du, dS/dv. Empty on failure.
+//
+// Packed rather than three calls because D1 computes all three together and splitting
+// it would evaluate the surface three times to return one answer.
+inline rust::Vec<double> BRepAdaptor_Surface_d1(const BRepAdaptor_Surface &surface, double u, double v) {
+  rust::Vec<double> out;
+  try {
+    gp_Pnt p;
+    gp_Vec d1u, d1v;
+    surface.D1(u, v, p, d1u, d1v);
+    out.push_back(p.X());
+    out.push_back(p.Y());
+    out.push_back(p.Z());
+    out.push_back(d1u.X());
+    out.push_back(d1u.Y());
+    out.push_back(d1u.Z());
+    out.push_back(d1v.X());
+    out.push_back(d1v.Y());
+    out.push_back(d1v.Z());
+  } catch (...) {
+    rust::Vec<double> empty;
+    return empty;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Trimming: the p-curves that cut a face out of its surface
+// ---------------------------------------------------------------------------
+
+// True for an edge that exists only in parameter space -- the collapsed side of a
+// sphere's pole row, say. It has a p-curve but no 3D curve, and sampling it as though
+// it bounded something produces a spurious loop through the degenerate point.
+inline bool BRep_Tool_Degenerated(const TopoDS_Edge &edge) {
+  try {
+    return BRep_Tool::Degenerated(edge) == Standard_True;
+  } catch (...) {
+    return false;
+  }
+}
+
+// The 2D curve of an edge **as seen by one face**. The pair matters: a seam edge
+// belongs to the same face twice and has a different p-curve each time, which is
+// exactly what closes the loop around a periodic surface.
+//
+// Null when the edge carries no p-curve on this face.
+inline std::unique_ptr<HandleGeom2d_Curve> BRep_Tool_CurveOnSurface(const TopoDS_Edge &edge,
+                                                                    const TopoDS_Face &face) {
+  try {
+    Standard_Real first = 0.0, last = 0.0;
+    Handle(Geom2d_Curve) curve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+    if (curve.IsNull()) {
+      return std::unique_ptr<HandleGeom2d_Curve>();
+    }
+    return std::unique_ptr<HandleGeom2d_Curve>(new opencascade::handle<Geom2d_Curve>(curve));
+  } catch (...) {
+    return std::unique_ptr<HandleGeom2d_Curve>();
+  }
+}
+
+// [first, last] for the same edge/face pair, or empty.
+//
+// A second call rather than out-parameters: cxx would carry these as &mut f64, and the
+// two-call cost is per *edge*, not per sample, against a p-curve OCCT has already
+// cached on the edge.
+inline rust::Vec<double> BRep_Tool_CurveOnSurface_range(const TopoDS_Edge &edge, const TopoDS_Face &face) {
+  rust::Vec<double> out;
+  try {
+    Standard_Real first = 0.0, last = 0.0;
+    Handle(Geom2d_Curve) curve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+    if (curve.IsNull()) {
+      rust::Vec<double> empty;
+      return empty;
+    }
+    out.push_back(first);
+    out.push_back(last);
+  } catch (...) {
+    rust::Vec<double> empty;
+    return empty;
+  }
+  return out;
+}
+
+// Sample a p-curve. The Geom2d_* types were bound for construction only -- they could
+// be built and passed to a face builder, never read back. Null on failure.
+inline std::unique_ptr<gp_Pnt2d> Geom2d_Curve_value(const HandleGeom2d_Curve &curve, double t) {
+  try {
+    return std::unique_ptr<gp_Pnt2d>(new gp_Pnt2d(curve->Value(t)));
+  } catch (...) {
+    return std::unique_ptr<gp_Pnt2d>();
+  }
 }

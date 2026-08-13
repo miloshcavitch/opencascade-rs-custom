@@ -649,6 +649,139 @@ pub mod ffi {
         pub fn BRepAdaptor_Surface_ctor(face: &TopoDS_Face) -> UniquePtr<BRepAdaptor_Surface>;
         pub fn GetType(self: &BRepAdaptor_Surface) -> GeomAbs_SurfaceType;
 
+        /// `S(u,v)` — OCCT's own answer, at `f64`.
+        ///
+        /// This exists to be an **oracle**, not a production path: nothing renders
+        /// through it. The NURBS readback below crosses nine separate quantities —
+        /// poles, weights, knots, multiplicities, degrees, flags — and none of them is
+        /// self-checking. A transposed pole grid or a knot array off by one
+        /// multiplicity produces a surface that is smooth, plausible and wrong. This
+        /// lets a test compare against the kernel that owns the definition.
+        ///
+        /// Null on failure — an out-of-domain parameter reaches it.
+        pub fn BRepAdaptor_Surface_value(
+            surface: &BRepAdaptor_Surface,
+            u: f64,
+            v: f64,
+        ) -> UniquePtr<gp_Pnt>;
+
+        /// 9 doubles: position, `dS/du`, `dS/dv`. Empty on failure.
+        ///
+        /// One call because `D1` computes all three together; three calls would
+        /// evaluate the surface three times to return one answer.
+        pub fn BRepAdaptor_Surface_d1(surface: &BRepAdaptor_Surface, u: f64, v: f64) -> Vec<f64>;
+
+        // ------------------------------------------------------------------
+        // NURBS readback
+        // ------------------------------------------------------------------
+        //
+        // The bridge above this point was built to *author* geometry and to *mesh*
+        // it. This is the other direction: reading a surface's own definition out, so
+        // something other than OCCT can evaluate it.
+
+        /// The face rebuilt on B-spline geometry, or null.
+        ///
+        /// **The face, not the surface** — and that is the load-bearing part. The
+        /// obvious move is `BRep_Tool::Surface` then `GeomConvert`, which may
+        /// reparametrize while `UVBounds` and the p-curves still speak the original
+        /// surface's parameters; the surface, its domain and its trim loops would be
+        /// three answers to three different questions. `BRepBuilderAPI_NurbsConvert`
+        /// rebuilds surface and p-curves together, so reading all three off the
+        /// result is consistent by construction.
+        ///
+        /// Null is a real answer, not an error to paper over: a face OCCT declines to
+        /// convert is one this pipeline cannot render, and the caller falls back to
+        /// the mesher.
+        pub fn nurbs_convert_face(face: &TopoDS_Face) -> UniquePtr<TopoDS_Face>;
+
+        type HandleGeomBSplineSurface;
+
+        /// The B-spline surface under an already-converted face, or null.
+        ///
+        /// Deliberately does **not** convert as a fallback — see
+        /// [`nurbs_convert_face`]. The `DownCast` is what enforces the ordering.
+        pub fn bspline_surface_of_face(face: &TopoDS_Face) -> UniquePtr<HandleGeomBSplineSurface>;
+
+        /// A free function rather than an `IsNull` method: the bridge already carries
+        /// `IsNull` as a method on several handle types, and a same-named free
+        /// function collides with them in the generated module.
+        pub fn HandleGeomBSplineSurface_IsNull(surface: &HandleGeomBSplineSurface) -> bool;
+
+        pub fn bspline_u_degree(s: &HandleGeomBSplineSurface) -> i32;
+        pub fn bspline_v_degree(s: &HandleGeomBSplineSurface) -> i32;
+        pub fn bspline_nb_u_poles(s: &HandleGeomBSplineSurface) -> i32;
+        pub fn bspline_nb_v_poles(s: &HandleGeomBSplineSurface) -> i32;
+        pub fn bspline_nb_u_knots(s: &HandleGeomBSplineSurface) -> i32;
+        pub fn bspline_nb_v_knots(s: &HandleGeomBSplineSurface) -> i32;
+
+        /// A periodic knot vector is not clamped, and its pole count follows a
+        /// different identity from the open one. Getting this wrong yields a surface
+        /// rotated by one pole span that is otherwise exactly correct — closed,
+        /// seamless, the right radius — which is the failure mode with the fewest
+        /// symptoms in this whole file.
+        pub fn bspline_is_u_periodic(s: &HandleGeomBSplineSurface) -> bool;
+        pub fn bspline_is_v_periodic(s: &HandleGeomBSplineSurface) -> bool;
+
+        /// Whether the weights mean anything. A polynomial surface still answers
+        /// `Weight(i,j)` — with 1.0 — so this is not an optimisation but the
+        /// difference between reading a value and reading a placeholder.
+        pub fn bspline_is_u_rational(s: &HandleGeomBSplineSurface) -> bool;
+        pub fn bspline_is_v_rational(s: &HandleGeomBSplineSurface) -> bool;
+
+        /// `NbUPoles * NbVPoles * 4` doubles — `x, y, z, w` per pole, **u-major**, so
+        /// `pole(i,j)` is at `(i * NbVPoles + j) * 4`. Empty on failure.
+        ///
+        /// Flat-packed rather than a `Pole(i,j)` accessor because poles are the only
+        /// `O(n)` quantity here, and a per-pole binding would be one heap allocation
+        /// and one FFI hop per control point per face. The 1-based indices and the
+        /// ordering are settled in the shim, once.
+        pub fn bspline_poles(s: &HandleGeomBSplineSurface) -> Vec<f64>;
+
+        /// The **distinct** knots — OCCT stores them compressed, and the
+        /// multiplicities are the other half. Expanding the pair into a flat vector is
+        /// the consumer's job and is the single most dangerous step in this readback:
+        /// an off-by-one multiplicity is subtly wrong near every interior knot and
+        /// looks right everywhere else.
+        pub fn bspline_u_knots(s: &HandleGeomBSplineSurface) -> Vec<f64>;
+        pub fn bspline_v_knots(s: &HandleGeomBSplineSurface) -> Vec<f64>;
+        pub fn bspline_u_mults(s: &HandleGeomBSplineSurface) -> Vec<i32>;
+        pub fn bspline_v_mults(s: &HandleGeomBSplineSurface) -> Vec<i32>;
+
+        /// `[u_min, u_max, v_min, v_max]` for the **face's** domain, or empty.
+        ///
+        /// Not the surface's natural bounds: a face is a bounded region of a surface,
+        /// and a plane's own bounds are infinite. This is the sampling rectangle.
+        pub fn face_uv_bounds(face: &TopoDS_Face) -> Vec<f64>;
+
+        // ------------------------------------------------------------------
+        // Trimming
+        // ------------------------------------------------------------------
+
+        /// An edge that exists only in parameter space — the collapsed side of a
+        /// sphere's pole row. It has a p-curve but no 3D curve, and sampling it as
+        /// though it bounded something produces a spurious loop through the
+        /// degenerate point.
+        pub fn BRep_Tool_Degenerated(edge: &TopoDS_Edge) -> bool;
+
+        /// The 2D curve of an edge **as seen by one face**, or null.
+        ///
+        /// The pair matters. A seam edge belongs to the same face twice and has a
+        /// different p-curve each time, which is exactly what closes the loop around a
+        /// periodic surface.
+        pub fn BRep_Tool_CurveOnSurface(
+            edge: &TopoDS_Edge,
+            face: &TopoDS_Face,
+        ) -> UniquePtr<HandleGeom2d_Curve>;
+
+        /// `[first, last]` for the same edge/face pair, or empty. A second call rather
+        /// than out-parameters; the cost is per edge, not per sample.
+        pub fn BRep_Tool_CurveOnSurface_range(edge: &TopoDS_Edge, face: &TopoDS_Face) -> Vec<f64>;
+
+        /// Sample a p-curve. The `Geom2d_*` types were bound for construction only —
+        /// they could be built and handed to a face builder, never read back. Null on
+        /// failure.
+        pub fn Geom2d_Curve_value(curve: &HandleGeom2d_Curve, t: f64) -> UniquePtr<gp_Pnt2d>;
+
         // Primitives
         type BRepPrimAPI_MakePrism;
 
