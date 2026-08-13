@@ -753,6 +753,20 @@ pub mod ffi {
         /// and a plane's own bounds are infinite. This is the sampling rectangle.
         pub fn face_uv_bounds(face: &TopoDS_Face) -> Vec<f64>;
 
+        /// `[u, v, distance]` of the closest point on `surface` to `point`, or empty.
+        ///
+        /// The **conversion** oracle, and a different shape from the evaluation pair
+        /// above on purpose. `BRepBuilderAPI_NurbsConvert` may reparametrize, so
+        /// `S_orig(u,v)` and `S_conv(u,v)` can both be correct and disagree — an
+        /// equality at a shared parameter would fail on a conversion that did its job.
+        /// A distance never assumes the two agree about `(u,v)`.
+        ///
+        /// `LowerDistanceParameters` is bound directly a few hundred lines below with
+        /// no catch; it throws `StdFail_NotDone` when nothing was found. For this
+        /// caller a projection finding nothing is a normal outcome, so it goes through
+        /// a shim rather than reusing that binding.
+        pub fn project_point_on_surface(surface: &HandleGeomSurface, point: &gp_Pnt) -> Vec<f64>;
+
         // ------------------------------------------------------------------
         // Trimming
         // ------------------------------------------------------------------

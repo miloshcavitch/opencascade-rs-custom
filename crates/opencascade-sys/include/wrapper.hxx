@@ -1396,6 +1396,40 @@ inline rust::Vec<double> BRepAdaptor_Surface_d1(const BRepAdaptor_Surface &surfa
   return out;
 }
 
+// [u, v, distance] of the closest point on the surface, or empty.
+//
+// This is the *conversion* oracle, and it is a different shape from the two above on
+// purpose. BRepBuilderAPI_NurbsConvert may reparametrize, so S_orig(u,v) and
+// S_conv(u,v) can both be correct and disagree -- an equality at a shared parameter
+// would fail on a conversion that did its job. Asking how far a point *is* from the
+// surface never assumes the two agree about (u,v).
+//
+// GeomAPI_ProjectPointOnSurf's own accessors throw StdFail_NotDone when nothing was
+// found, and the existing binding of LowerDistanceParameters is a direct method call
+// with no catch -- so it is bound again here rather than reused, because a projection
+// that finds nothing is a normal outcome for this caller and must not abort the
+// process.
+inline rust::Vec<double> project_point_on_surface(const HandleGeomSurface &surface,
+                                                  const gp_Pnt &point) {
+  rust::Vec<double> out;
+  try {
+    GeomAPI_ProjectPointOnSurf projector(point, surface);
+    if (!projector.IsDone() || projector.NbPoints() < 1) {
+      rust::Vec<double> empty;
+      return empty;
+    }
+    Standard_Real u = 0.0, v = 0.0;
+    projector.LowerDistanceParameters(u, v);
+    out.push_back(u);
+    out.push_back(v);
+    out.push_back(projector.LowerDistance());
+  } catch (...) {
+    rust::Vec<double> empty;
+    return empty;
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Trimming: the p-curves that cut a face out of its surface
 // ---------------------------------------------------------------------------

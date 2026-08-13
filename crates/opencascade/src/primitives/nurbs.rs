@@ -28,7 +28,7 @@
 use glam::DVec3;
 use opencascade_sys::ffi;
 
-use crate::primitives::Face;
+use crate::primitives::{make_point, Face};
 
 /// Why a face could not be read as a B-spline.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,7 +138,52 @@ impl NurbsFace {
     /// so a test that samples outside [`NurbsFace::bounds`] gets an answer rather than
     /// a crash.
     pub fn occt_value(&self, u: f64, v: f64) -> Option<DVec3> {
-        let adaptor = ffi::BRepAdaptor_Surface_ctor(&self.face.inner);
+        self.face.occt_value(u, v)
+    }
+
+    /// OCCT's `S`, `dS/du`, `dS/dv` in one evaluation. See [`Self::occt_value`].
+    pub fn occt_d1(&self, u: f64, v: f64) -> Option<(DVec3, DVec3, DVec3)> {
+        self.face.occt_d1(u, v)
+    }
+
+    /// How far `point` lies from the converted surface, by OCCT's own projection.
+    ///
+    /// **The conversion oracle, and deliberately not an equality.**
+    /// [`Self::occt_value`] checks the *readback* — that our numbers describe the
+    /// surface OCCT converted to. It says nothing about whether that surface is the one
+    /// we started with, and the obvious way to check that is wrong: `NurbsConvert` may
+    /// reparametrize, so `S_orig(u, v)` and `S_conv(u, v)` can both be correct and
+    /// differ, and an equality at a shared parameter fails on a conversion that did its
+    /// job.
+    ///
+    /// Sampling the *original* face and asking this how far each point is from the
+    /// converted surface is parametrization-independent, because it never assumes the
+    /// two agree about `(u, v)` — only that the point still lies on the surface. The
+    /// tolerance is a conversion tolerance; state it rather than tune it.
+    ///
+    /// `None` when the projection found nothing.
+    pub fn distance_to(&self, point: DVec3) -> Option<f64> {
+        let surface = ffi::BRep_Tool_Surface(&self.face.inner);
+        let p = make_point(point);
+        let out = ffi::project_point_on_surface(&surface, &p);
+        (out.len() == 3).then(|| out[2])
+    }
+}
+
+impl Face {
+    /// OCCT's own `S(u,v)` on **this** face's surface, whatever type it happens to be.
+    ///
+    /// On `Face` rather than only on [`NurbsFace`] because the conversion test needs to
+    /// evaluate the *original* face — the one that is still a `Cylinder` or a `Plane` —
+    /// and `Face::inner` is crate-private, so nothing outside this crate could reach it.
+    /// [`NurbsFace::occt_value`] is this method on the converted face.
+    ///
+    /// `None` when OCCT threw. An out-of-domain parameter is a real way to reach that,
+    /// so a caller that samples outside [`Self::uv_bounds`] gets an answer rather than a
+    /// process abort — OCCT exceptions crossing the FFI uncaught are `SIGABRT`, not
+    /// `Err`.
+    pub fn occt_value(&self, u: f64, v: f64) -> Option<DVec3> {
+        let adaptor = ffi::BRepAdaptor_Surface_ctor(&self.inner);
         let p = ffi::BRepAdaptor_Surface_value(&adaptor, u, v);
         if p.is_null() {
             return None;
@@ -148,7 +193,7 @@ impl NurbsFace {
 
     /// OCCT's `S`, `dS/du`, `dS/dv` in one evaluation. See [`Self::occt_value`].
     pub fn occt_d1(&self, u: f64, v: f64) -> Option<(DVec3, DVec3, DVec3)> {
-        let adaptor = ffi::BRepAdaptor_Surface_ctor(&self.face.inner);
+        let adaptor = ffi::BRepAdaptor_Surface_ctor(&self.inner);
         let d = ffi::BRepAdaptor_Surface_d1(&adaptor, u, v);
         if d.len() != 9 {
             return None;
@@ -159,9 +204,21 @@ impl NurbsFace {
             DVec3::new(d[6], d[7], d[8]),
         ))
     }
-}
 
-impl Face {
+    /// `BRepTools::UVBounds` — `(u_min, u_max, v_min, v_max)`, the face's own parametric
+    /// rectangle.
+    ///
+    /// Not the surface's range. A plane's surface is infinite in both directions; this
+    /// is the part of it the face occupies, and it is the only sampling rectangle that
+    /// means anything.
+    pub fn uv_bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        let b = ffi::face_uv_bounds(&self.inner);
+        if b.len() != 4 {
+            return None;
+        }
+        Some((b[0], b[1], b[2], b[3]))
+    }
+
     /// Convert this face to B-spline geometry and read the surface back.
     ///
     /// Returns the converted face alongside the numbers — see [`NurbsFace::face`] for
