@@ -11,6 +11,7 @@ mod shape;
 mod shell;
 mod solid;
 mod surface;
+mod trim;
 mod vertex;
 mod wire;
 
@@ -23,6 +24,7 @@ pub use shape::*;
 pub use shell::*;
 pub use solid::*;
 pub use surface::*;
+pub use trim::*;
 pub use vertex::*;
 pub use wire::*;
 

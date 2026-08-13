@@ -41,6 +41,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeAnalysis.hxx>
@@ -1494,5 +1495,55 @@ inline std::unique_ptr<gp_Pnt2d> Geom2d_Curve_value(const HandleGeom2d_Curve &cu
     return std::unique_ptr<gp_Pnt2d>(new gp_Pnt2d(curve->Value(t)));
   } catch (...) {
     return std::unique_ptr<gp_Pnt2d>();
+  }
+}
+
+// Walk a wire's edges in CONNECTION order, which TopExp_Explorer does not promise.
+//
+// This is the whole reason for the type. TopExp_Explorer visits the edges a wire
+// contains, in whatever order the TShape stores them; BRepTools_WireExplorer walks the
+// chain, vertex to vertex, and hands back each edge oriented as the wire traverses it.
+// For a trim loop those are not interchangeable: a loop assembled in explorer order is
+// closed only by coincidence, and the winding-number test that consumes it reads a
+// scrambled polygon as a plausible, wrong region.
+//
+// Face-aware on purpose. The two-argument constructor is what makes a SEAM edge behave:
+// a seam belongs to the same face twice with a different p-curve each time, and only
+// the (wire, face) form knows which traversal it is on.
+//
+// Null when OCCT threw -- a wire the explorer cannot start on is a real outcome, not a
+// reason to abort the process.
+inline std::unique_ptr<BRepTools_WireExplorer> BRepTools_WireExplorer_ctor(const TopoDS_Wire &wire,
+                                                                          const TopoDS_Face &face) {
+  try {
+    return std::unique_ptr<BRepTools_WireExplorer>(new BRepTools_WireExplorer(wire, face));
+  } catch (...) {
+    return std::unique_ptr<BRepTools_WireExplorer>();
+  }
+}
+
+// The edge the explorer is on, carrying its orientation within the wire.
+inline std::unique_ptr<TopoDS_Edge> WireExplorerCurrentEdge(const BRepTools_WireExplorer &explorer) {
+  return std::unique_ptr<TopoDS_Edge>(new TopoDS_Edge(explorer.Current()));
+}
+
+// BRepTools::OuterWire with a catch, and null rather than an empty wire when there is
+// none.
+//
+// Deliberately a second entry point rather than a fix to `outer_wire` above: that one
+// allocates unconditionally and four callers in this crate rely on it returning a wire,
+// so making it nullable is a change to their contract and not to this one. OuterWire
+// raises on a face carrying no wires, and an OCCT throw crossing the FFI uncaught is a
+// SIGABRT rather than an Err -- which for a caller that is *asking* whether a face has
+// an outer wire is the wrong answer to a reasonable question.
+inline std::unique_ptr<TopoDS_Wire> face_outer_wire(const TopoDS_Face &face) {
+  try {
+    TopoDS_Wire wire = BRepTools::OuterWire(face);
+    if (wire.IsNull()) {
+      return std::unique_ptr<TopoDS_Wire>();
+    }
+    return std::unique_ptr<TopoDS_Wire>(new TopoDS_Wire(wire));
+  } catch (...) {
+    return std::unique_ptr<TopoDS_Wire>();
   }
 }

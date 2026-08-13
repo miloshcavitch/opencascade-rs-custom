@@ -1,5 +1,21 @@
 use thiserror::Error;
 
+/// **The `glam` this crate's signatures are written in**, re-exported so a consumer can
+/// name it.
+///
+/// Not a convenience. A downstream workspace on a different `glam` major sees two
+/// unrelated types that share a name, spelling, field set and layout — `DVec3` and
+/// `DVec3` — and the compiler's diagnostic for it is the famously unhelpful
+/// `expected DVec3, found DVec3`. Without this, a caller's only recourses are to pin its
+/// own `glam` to ours, or to `transmute`. The first couples an unrelated workspace's
+/// version choice to this crate's; the second compiles today and becomes a silent
+/// reinterpretation the moment either side changes layout.
+///
+/// So the boundary is made **nameable** instead: `opencascade::glam::DVec3` is
+/// unambiguously the one these functions take, and a conversion written against it is a
+/// conversion someone can see.
+pub use glam;
+
 pub mod angle;
 pub mod bounding_box;
 pub mod kicad;

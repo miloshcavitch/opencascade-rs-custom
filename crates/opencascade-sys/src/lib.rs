@@ -494,6 +494,16 @@ pub mod ffi {
 
         pub fn IsNull(self: &TopoDS_Shape) -> bool;
         pub fn IsEqual(self: &TopoDS_Shape, other: &TopoDS_Shape) -> bool;
+        /// Same underlying `TShape` and location, **ignoring orientation** — where
+        /// `IsEqual` also demands the orientations match.
+        ///
+        /// The distinction is not academic for wires. `BRepTools::OuterWire` hands back
+        /// the wire as the face stores it, but a wire reached through a `TopExp_Explorer`
+        /// carries the orientation accumulated along the path that found it, so the two
+        /// can be the same wire and compare unequal. Telling the outer wire from the
+        /// holes with `IsEqual` therefore mislabels faces intermittently, which presents
+        /// as a face rendering as its own hole.
+        pub fn IsSame(self: &TopoDS_Shape, other: &TopoDS_Shape) -> bool;
         pub fn ShapeType(self: &TopoDS_Shape) -> TopAbs_ShapeEnum;
 
         type TopAbs_Orientation;
@@ -795,6 +805,30 @@ pub mod ffi {
         /// they could be built and handed to a face builder, never read back. Null on
         /// failure.
         pub fn Geom2d_Curve_value(curve: &HandleGeom2d_Curve, t: f64) -> UniquePtr<gp_Pnt2d>;
+
+        /// A wire's edges in **connection order**, which `TopExp_Explorer` does not
+        /// promise. See the shim; the difference is the whole reason this type exists.
+        ///
+        /// Null when OCCT declined the wire.
+        type BRepTools_WireExplorer;
+
+        pub fn BRepTools_WireExplorer_ctor(
+            wire: &TopoDS_Wire,
+            face: &TopoDS_Face,
+        ) -> UniquePtr<BRepTools_WireExplorer>;
+
+        pub fn More(self: &BRepTools_WireExplorer) -> bool;
+        pub fn Next(self: Pin<&mut BRepTools_WireExplorer>);
+
+        /// The current edge, carrying its orientation **within the wire** — which is
+        /// what says whether its p-curve is traversed first→last or last→first.
+        pub fn WireExplorerCurrentEdge(
+            explorer: &BRepTools_WireExplorer,
+        ) -> UniquePtr<TopoDS_Edge>;
+
+        /// `BRepTools::OuterWire` with a catch, null when the face has none. Distinct
+        /// from `outer_wire` above, which cannot report absence — see the shim.
+        pub fn face_outer_wire(face: &TopoDS_Face) -> UniquePtr<TopoDS_Wire>;
 
         // Primitives
         type BRepPrimAPI_MakePrism;
@@ -1911,4 +1945,5 @@ unsafe impl Send for ffi::TopoDS_Compound {}
 unsafe impl Send for ffi::TopoDS_Shape {}
 
 unsafe impl Send for ffi::TopExp_Explorer {}
+unsafe impl Send for ffi::BRepTools_WireExplorer {}
 unsafe impl Send for ffi::BRepFilletAPI_MakeChamfer {}
