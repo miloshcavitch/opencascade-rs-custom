@@ -4,17 +4,47 @@
 //! other direction, and it exists so that something outside OCCT — a compute shader,
 //! say — can evaluate a surface OCCT owns.
 //!
-//! # The order matters and is enforced by types
+//! # One face answers all three questions, and that is the rule
 //!
-//! [`Face::to_nurbs`] converts the *face*, not the surface. The tempting shortcut is
+//! A surface, a UV domain and a set of p-curves are three answers to the same question,
+//! and they are only consistent if they come from **one face**. The tempting shortcut is
 //! `BRep_Tool::Surface` followed by `GeomConvert::SurfaceToBSplineSurface`; it is wrong
-//! in a way that does not show up until trimming, because the conversion may
-//! reparametrize while `UVBounds` and the p-curves still speak the original surface's
+//! in a way that does not show up until trimming, because that conversion may
+//! reparametrize the surface while `UVBounds` and the p-curves still speak the original's
 //! parameters. `BRepBuilderAPI_NurbsConvert` rebuilds surface and p-curves together, so
-//! the surface, its domain and its trim loops are three answers to the same question.
+//! its face answers all three consistently.
 //!
-//! That is why [`NurbsFace`] holds the converted `Face` rather than only the numbers:
-//! whatever reads the trim loops later must read them off *this* face.
+//! That is why [`NurbsFace`] holds a `Face` rather than only the numbers: whatever reads
+//! the trim loops later must read them off the face the numbers came from.
+//!
+//! # When the conversion is skipped, and why that keeps the rule rather than breaking it
+//!
+//! [`Face::to_nurbs`] tries the surface accessor on the original face first.
+//! `BRepTools_NurbsConvertModification::NewSurface` opens by returning `Standard_False`
+//! for a surface whose `DynamicType()` is already `Geom_BSplineSurface`, so on such a
+//! face `BRepBuilderAPI_NurbsConvert` builds **no new surface at all** — it rebuilds the
+//! topology with `BRepTools_Modifier` and the original surface handle comes through
+//! untouched. A `Handle(Geom_BSplineSurface)::DownCast` succeeding on the original face
+//! *is* that condition, so the two tests are the same test and the branch is the kernel's
+//! own skip rule rather than a guess at it.
+//!
+//! The rule above survives because the fast path reads surface, domain **and** p-curves
+//! off the original face. One face, three consistent answers. What the rule forbids is
+//! mixing the two faces, and nothing here does.
+//!
+//! It is worth this much prose because it is not free: measured on a ten-shape sweep
+//! fixture, the conversion was 2089 ms of a 2091 ms readback, on ten faces that were all
+//! already B-splines.
+//!
+//! **One real difference, and it is in the p-curves rather than the surface.**
+//! `NewCurve2d` has no such early-out — every p-curve is rebuilt as a B-spline even when
+//! the surface is kept, and `Geom2dConvert::CurveToBSplineCurve` reparametrizes a conic.
+//! Trim loops read off the original therefore trace the *same* UV boundary with a
+//! slightly different distribution of samples along each edge. For an isoparametric
+//! p-curve — a swept face's, say — degree-1 conversion preserves parametrization and the
+//! polylines are identical. For a conic in UV they differ, by less than the sampling
+//! density's own error. [`NurbsFace::converted`] says which face a given readback used,
+//! so this is observable rather than inferred.
 //!
 //! # What is not checked here
 //!
@@ -86,9 +116,22 @@ pub struct NurbsAxis {
 /// A face's surface, read back as a rational B-spline, together with the converted
 /// face it came from.
 pub struct NurbsFace {
-    /// The face after `BRepBuilderAPI_NurbsConvert`. **Trim loops must be read off
-    /// this**, not off the original — see the module note.
+    /// The face the numbers were read off — the original when it was already a
+    /// B-spline, otherwise the one `BRepBuilderAPI_NurbsConvert` built.
+    ///
+    /// **Trim loops must be read off this**, not off whichever face the caller happens
+    /// to be holding — see the module note. That warning is unchanged by the fast path
+    /// and is now the whole point of the field: a caller cannot tell by looking which
+    /// face it got, and does not have to.
     pub face: Face,
+    /// Whether `BRepBuilderAPI_NurbsConvert` ran.
+    ///
+    /// `false` means [`Self::face`] is the original — the conversion was skipped
+    /// because OCCT's own `NewSurface` would have declined it. Reported rather than
+    /// inferred so that a caller measuring the readback can say which branch it timed,
+    /// and so that a fast path that has quietly stopped firing is visible instead of
+    /// merely slow.
+    pub converted: bool,
     pub u: NurbsAxis,
     pub v: NurbsAxis,
     /// `u.pole_count * v.pole_count` poles, **u-major**: `pole(i, j)` is at
@@ -219,21 +262,47 @@ impl Face {
         Some((b[0], b[1], b[2], b[3]))
     }
 
-    /// Convert this face to B-spline geometry and read the surface back.
+    /// Read this face's surface back as a B-spline, converting it first only if it is
+    /// not one already.
     ///
-    /// Returns the converted face alongside the numbers — see [`NurbsFace::face`] for
-    /// why that pairing is not optional.
+    /// Returns the face the numbers came off alongside the numbers — see
+    /// [`NurbsFace::face`] for why that pairing is not optional, and the module note for
+    /// why skipping the conversion keeps rather than breaks it.
     pub fn to_nurbs(&self) -> Result<NurbsFace, NurbsError> {
-        let converted = ffi::nurbs_convert_face(&self.inner);
-        if converted.is_null() {
-            return Err(NurbsError::ConversionFailed);
-        }
-        let face = Face { inner: converted };
+        // The accessor on the *original* face, before spending anything. It succeeds
+        // exactly when the face already carries a `Geom_BSplineSurface`, which is the
+        // same condition `BRepTools_NurbsConvertModification::NewSurface` tests before
+        // returning `Standard_False` — so a success here means the conversion below
+        // would have rebuilt the topology and handed this same surface handle back.
+        //
+        // The probe is safe on any face: the shim catches OCCT throws and returns null
+        // for both a null surface and a failed `DownCast`, so a plane or a cone costs
+        // one null check.
+        //
+        // Note the `DownCast` is stricter than `BRepAdaptor_Surface::GetType()`, which
+        // unwraps a `Geom_RectangularTrimmedSurface` to its basis. A trimmed B-spline
+        // therefore takes the slow path here even though an adaptor would call it a
+        // B-spline — which is the correct way round, since its own surface handle is the
+        // wrapper and the conversion is what removes it.
+        let direct = ffi::bspline_surface_of_face(&self.inner);
+        let (face, surface, converted) =
+            if !direct.is_null() && !ffi::HandleGeomBSplineSurface_IsNull(&direct) {
+                // `from_face` copies the handle, not the geometry: a `TopoDS_Face` is a
+                // TShape pointer with a location and an orientation.
+                (Face::from_face(&self.inner), direct, false)
+            } else {
+                let out = ffi::nurbs_convert_face(&self.inner);
+                if out.is_null() {
+                    return Err(NurbsError::ConversionFailed);
+                }
+                let face = Face { inner: out };
 
-        let surface = ffi::bspline_surface_of_face(&face.inner);
-        if surface.is_null() || ffi::HandleGeomBSplineSurface_IsNull(&surface) {
-            return Err(NurbsError::NotBSpline);
-        }
+                let surface = ffi::bspline_surface_of_face(&face.inner);
+                if surface.is_null() || ffi::HandleGeomBSplineSurface_IsNull(&surface) {
+                    return Err(NurbsError::NotBSpline);
+                }
+                (face, surface, true)
+            };
 
         let n_u = ffi::bspline_nb_u_poles(&surface).max(0) as usize;
         let n_v = ffi::bspline_nb_v_poles(&surface).max(0) as usize;
@@ -281,7 +350,15 @@ impl Face {
             return Err(NurbsError::ReadFailed("UV bounds"));
         }
 
-        Ok(NurbsFace { face, u, v, poles, weights, bounds: (b[0], b[1], b[2], b[3]) })
+        Ok(NurbsFace {
+            face,
+            converted,
+            u,
+            v,
+            poles,
+            weights,
+            bounds: (b[0], b[1], b[2], b[3]),
+        })
     }
 }
 

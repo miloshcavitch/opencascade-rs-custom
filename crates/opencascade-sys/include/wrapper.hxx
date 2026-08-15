@@ -1199,10 +1199,21 @@ inline std::unique_ptr<TopoDS_Face> nurbs_convert_face(const TopoDS_Face &face) 
 
 // The B-spline surface under a face, or null.
 //
-// Expects a face that has already been through nurbs_convert_face; the DownCast is
-// what enforces that. Deliberately does not convert as a fallback, because a
-// conversion here would produce a surface whose parameters the caller's UV bounds and
-// p-curves do not share -- see rule 1 above.
+// Deliberately does not convert as a fallback, because a conversion here would produce
+// a surface whose parameters the caller's UV bounds and p-curves do not share -- see
+// rule 1 above. That rule is about where the three answers come from, not about which
+// face is passed: reading surface, UV bounds and p-curves all off one face satisfies it
+// whether or not that face has been through nurbs_convert_face.
+//
+// So this is called on both, and the DownCast is what distinguishes them. On the
+// original face it succeeds exactly when the face already carries a
+// Geom_BSplineSurface -- which is the same condition
+// BRepTools_NurbsConvertModification::NewSurface tests before declining to build a new
+// one, so a success here means the conversion would have handed this very handle back.
+// Face::to_nurbs uses that to skip it.
+//
+// Safe to call on anything: a null surface, a DownCast that fails and an OCCT throw all
+// return null, so probing a plane or a cone costs a null check rather than an abort.
 inline std::unique_ptr<HandleGeomBSplineSurface> bspline_surface_of_face(const TopoDS_Face &face) {
   try {
     Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
