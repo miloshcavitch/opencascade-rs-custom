@@ -290,6 +290,24 @@ impl Face {
                 // `from_face` copies the handle, not the geometry: a `TopoDS_Face` is a
                 // TShape pointer with a location and an orientation.
                 (Face::from_face(&self.inner), direct, false)
+            } else if let Some(bezier) = {
+                // Bezier is the one surface type the conversion below refuses: it returns
+                // `Standard_False` for it for the same reason it returns `Standard_False`
+                // for a B-spline — OCCT counts Bezier as already NURBS — so a Bezier face
+                // fails the probe above, comes back unmodified from `nurbs_convert_face`,
+                // fails the probe again, and errors `NotBSpline`. It has no route at all.
+                //
+                // The shim opens one. It is a rewrite rather than a fit (knots {0,1},
+                // mults degree+1, poles verbatim), and the same refusal that stranded the
+                // face is what keeps its UV bounds and p-curves speaking the [0,1]²
+                // the rewrite preserves. Tried here rather than after the conversion so
+                // the exact route wins over the general one.
+                let b = ffi::bspline_from_bezier_face(&self.inner);
+                (!b.is_null() && !ffi::HandleGeomBSplineSurface_IsNull(&b)).then_some(b)
+            } {
+                // `converted` is true: the numbers are a different representation of this
+                // face's surface, not the handle the face itself carries.
+                (Face::from_face(&self.inner), bezier, true)
             } else {
                 let out = ffi::nurbs_convert_face(&self.inner);
                 if out.is_null() {

@@ -712,6 +712,23 @@ pub mod ffi {
         /// [`nurbs_convert_face`]. The `DownCast` is what enforces the ordering.
         pub fn bspline_surface_of_face(face: &TopoDS_Face) -> UniquePtr<HandleGeomBSplineSurface>;
 
+        /// The B-spline form of a face carrying a `Geom_BezierSurface`, or null for
+        /// every other surface type.
+        ///
+        /// The one place converting the surface directly is correct, because it is the
+        /// one place [`nurbs_convert_face`] *declines* to act:
+        /// `BRepTools_NurbsConvertModification::NewSurface` returns false for a Bezier,
+        /// so a Bezier face reaches neither of the two probes above and renders as
+        /// nothing. Declining is also what makes this safe — the face was never
+        /// rebuilt, so its UV bounds and p-curves still speak the Bezier's own
+        /// `[0,1]²`, which is exactly the parametrization `SurfaceToBSplineSurface`
+        /// hands back (knots `{0,1}`, mults `degree+1`, poles copied — no fit).
+        ///
+        /// Gated on `DynamicType`, not `IsKind`: subclasses do not inherit that
+        /// argument.
+        pub fn bspline_from_bezier_face(face: &TopoDS_Face)
+            -> UniquePtr<HandleGeomBSplineSurface>;
+
         /// A free function rather than an `IsNull` method: the bridge already carries
         /// `IsNull` as a method on several handle types, and a same-named free
         /// function collides with them in the generated module.

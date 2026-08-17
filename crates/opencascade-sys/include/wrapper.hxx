@@ -56,6 +56,7 @@
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_JoinType.hxx>
+#include <GeomConvert.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
@@ -1221,6 +1222,47 @@ inline std::unique_ptr<HandleGeomBSplineSurface> bspline_surface_of_face(const T
       return std::unique_ptr<HandleGeomBSplineSurface>();
     }
     Handle(Geom_BSplineSurface) bspline = Handle(Geom_BSplineSurface)::DownCast(surface);
+    if (bspline.IsNull()) {
+      return std::unique_ptr<HandleGeomBSplineSurface>();
+    }
+    return std::unique_ptr<HandleGeomBSplineSurface>(
+        new opencascade::handle<Geom_BSplineSurface>(bspline));
+  } catch (...) {
+    return std::unique_ptr<HandleGeomBSplineSurface>();
+  }
+}
+
+// The single exception to rule 1, and it is narrow on purpose.
+//
+// BRepTools_NurbsConvertModification::NewSurface returns Standard_False for a
+// Geom_BezierSurface (BRepTools_NurbsConvertModification.cxx:247) -- OCCT considers Bezier
+// to already *be* NURBS and declines to build a new surface. So nurbs_convert_face hands
+// back an unmodified face, bspline_surface_of_face's DownCast fails on it too, and a Bezier
+// face has no B-spline route at all. It renders as nothing.
+//
+// Converting the surface directly is what rule 1 forbids, and the reason it forbids it is
+// reparametrization: a conversion that moves the parameters leaves UVBounds and the p-curves
+// describing a domain the new surface does not have. That reason does not apply here, and
+// not by luck --
+//
+//   * GeomConvert::SurfaceToBSplineSurface's Bezier branch (GeomConvert_1.cxx:822) sets knots
+//     {0, 1} with multiplicities degree+1 at both ends and copies poles and weights verbatim.
+//     A Bezier is already parametrized on [0,1]^2. The result is the same surface written a
+//     different way, not a fit.
+//   * And the conversion *declining* is exactly what guarantees the rest is untouched: since
+//     NurbsConvert never rebuilt the face, its UV bounds and p-curves still speak the Bezier's
+//     own parameters -- which are the parameters this returns.
+//
+// Hence the DynamicType gate rather than an IsKind or a DownCast. Anything that is not
+// literally a Geom_BezierSurface gets null and falls back to the general path, where rule 1
+// still holds with no exceptions.
+inline std::unique_ptr<HandleGeomBSplineSurface> bspline_from_bezier_face(const TopoDS_Face &face) {
+  try {
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    if (surface.IsNull() || surface->DynamicType() != STANDARD_TYPE(Geom_BezierSurface)) {
+      return std::unique_ptr<HandleGeomBSplineSurface>();
+    }
+    Handle(Geom_BSplineSurface) bspline = GeomConvert::SurfaceToBSplineSurface(surface);
     if (bspline.IsNull()) {
       return std::unique_ptr<HandleGeomBSplineSurface>();
     }
