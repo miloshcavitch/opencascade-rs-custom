@@ -41,6 +41,9 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BinTools.hxx>
+#include <sstream>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRep_Tool.hxx>
 #include <ShapeFix_Face.hxx>
@@ -501,6 +504,36 @@ inline bool add_shape(IGESControl_Writer &writer, const TopoDS_Shape &theShape) 
 
 inline IFSelect_ReturnStatus write_step(STEPControl_Writer &writer, rust::String theFileName) {
   return writer.Write(theFileName.c_str());
+}
+
+// In-process shape transfer (kernel_bench). A TopoDS_Shape copied by value shares its
+// TShapes, so it is not a copy at all; these two are the real ones.
+//
+// `deep_copy_shape`: BRepBuilderAPI_Copy with geometry copied and triangulation dropped.
+inline std::unique_ptr<TopoDS_Shape> deep_copy_shape(const TopoDS_Shape &shape) {
+  BRepBuilderAPI_Copy copier(shape, Standard_True, Standard_False);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(copier.Shape()));
+}
+
+// OCCT's native binary BREP, in memory, without triangulations.
+inline rust::Vec<uint8_t> write_brep_bin(const TopoDS_Shape &shape) {
+  std::ostringstream os(std::ios::out | std::ios::binary);
+  BinTools::Write(shape, os, Standard_False, Standard_False, BinTools_FormatVersion_CURRENT);
+  const std::string s = os.str();
+  rust::Vec<uint8_t> out;
+  out.reserve(s.size());
+  for (char c : s) {
+    out.push_back(static_cast<uint8_t>(c));
+  }
+  return out;
+}
+
+inline std::unique_ptr<TopoDS_Shape> read_brep_bin(rust::Slice<const uint8_t> data) {
+  std::istringstream is(std::string(reinterpret_cast<const char *>(data.data()), data.size()),
+                        std::ios::in | std::ios::binary);
+  TopoDS_Shape shape;
+  BinTools::Read(shape, is);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(shape));
 }
 
 inline bool write_iges(IGESControl_Writer &writer, rust::String theFileName) {

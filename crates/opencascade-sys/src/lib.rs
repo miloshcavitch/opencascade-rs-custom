@@ -1644,6 +1644,11 @@ pub mod ffi {
         ) -> IFSelect_ReturnStatus;
         pub fn write_iges(writer: Pin<&mut IGESControl_Writer>, filename: String) -> bool;
 
+        // In-process shape transfer — see the note in wrapper.hxx.
+        pub fn deep_copy_shape(shape: &TopoDS_Shape) -> UniquePtr<TopoDS_Shape>;
+        pub fn write_brep_bin(shape: &TopoDS_Shape) -> Vec<u8>;
+        pub fn read_brep_bin(data: &[u8]) -> UniquePtr<TopoDS_Shape>;
+
         type StlAPI_Writer;
 
         #[cxx_name = "construct_unique"]

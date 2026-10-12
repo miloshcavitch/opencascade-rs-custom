@@ -542,6 +542,30 @@ impl Shape {
         Ok(Self { inner })
     }
 
+    /// A second handle on the same TShapes — what `Clone` on a `TopoDS_Shape` is. Costs
+    /// nothing and copies nothing; anything that mutates one (meshing writes a
+    /// triangulation into every face) is visible through the other.
+    pub fn share_handle(&self) -> Self {
+        Self::from_shape(&self.inner)
+    }
+
+    /// An independent copy of the topology and geometry (`BRepBuilderAPI_Copy`), without
+    /// triangulation.
+    pub fn deep_copy(&self) -> Self {
+        Self { inner: ffi::deep_copy_shape(&self.inner) }
+    }
+
+    /// OCCT's native binary BREP, in memory, without triangulation.
+    pub fn to_brep_bin(&self) -> Vec<u8> {
+        ffi::write_brep_bin(&self.inner)
+    }
+
+    /// Inverse of [`Self::to_brep_bin`]. The bytes must have come from it: a malformed
+    /// stream throws inside OCCT, which the bridge cannot catch.
+    pub fn from_brep_bin(bytes: &[u8]) -> Self {
+        Self { inner: ffi::read_brep_bin(bytes) }
+    }
+
     pub fn write_step(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let mut writer = ffi::STEPControl_Writer_ctor();
 
