@@ -630,6 +630,14 @@ pub mod ffi {
         /// Uses OCCT Shape Healing. Returns null on failure.
         pub fn ShapeFix_Face_FixOrientation(face: &TopoDS_Face) -> UniquePtr<TopoDS_Face>;
 
+        /// TopoDS_Shape::Reversed — the shape with its orientation flipped (an inside-out
+        /// solid made outward). Shares the geometry.
+        pub fn TopoDS_Shape_Reversed(shape: &TopoDS_Shape) -> UniquePtr<TopoDS_Shape>;
+
+        /// A hollow solid: `outer`'s shells outside, `inner`'s shells reversed inside (no
+        /// boolean). Null on failure.
+        pub fn MakeHollowSolid(outer: &TopoDS_Shape, inner: &TopoDS_Shape) -> UniquePtr<TopoDS_Shape>;
+
         /// Bulk edge classification by face adjacency.
         /// Returns flat-packed: [n_naked, n_interior, n_non_manifold, naked_indices..., interior_indices..., nm_indices...]
         pub fn brep_classify_edges(shape: &TopoDS_Shape) -> Vec<i32>;

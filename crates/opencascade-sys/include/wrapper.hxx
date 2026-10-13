@@ -25,6 +25,7 @@
 #include <BRepGProp_Face.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepLib.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
@@ -1130,6 +1131,41 @@ inline std::unique_ptr<TopoDS_Face> ShapeFix_Face_FixOrientation(
     sff->FixOrientation();
     if (sff->Face().IsNull()) return nullptr;
     return std::unique_ptr<TopoDS_Face>(new TopoDS_Face(sff->Face()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+// The same shape with its orientation flipped (TopoDS_Shape::Reversed): a solid whose
+// faces point inward becomes one whose faces point outward. Geometry is shared, not
+// copied.
+inline std::unique_ptr<TopoDS_Shape> TopoDS_Shape_Reversed(const TopoDS_Shape &shape) {
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(shape.Reversed()));
+}
+
+// A hollow solid: the shells of `outer` as its outside and the shells of `inner`, reversed
+// so they face into the cavity, as its inside — a solid with two boundaries, which is what
+// a shelled solid is. Built directly rather than as outer - inner by a boolean cut: the cut
+// of a solid and its own offset segfaulted inside BOPAlgo's classification (Extrema_ExtCC)
+// on the second build in a session. BRepLib::OrientClosedSolid settles the orientation.
+// Null when either has no shell or the result is not a valid solid.
+inline std::unique_ptr<TopoDS_Shape> MakeHollowSolid(const TopoDS_Shape &outer, const TopoDS_Shape &inner) {
+  try {
+    BRep_Builder builder;
+    TopoDS_Solid solid;
+    builder.MakeSolid(solid);
+    int outer_shells = 0, inner_shells = 0;
+    for (TopExp_Explorer e(outer, TopAbs_SHELL); e.More(); e.Next()) {
+      builder.Add(solid, e.Current());
+      ++outer_shells;
+    }
+    for (TopExp_Explorer e(inner, TopAbs_SHELL); e.More(); e.Next()) {
+      builder.Add(solid, e.Current().Reversed());
+      ++inner_shells;
+    }
+    if (outer_shells == 0 || inner_shells == 0) return nullptr;
+    if (!BRepLib::OrientClosedSolid(solid)) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(solid));
   } catch (...) {
     return nullptr;
   }

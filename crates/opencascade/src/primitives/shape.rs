@@ -280,6 +280,27 @@ impl Shape {
         Self { inner }
     }
 
+    /// The enclosed volume (BRepGProp::VolumeProperties), signed: negative when the
+    /// faces point inward — a solid turned inside out.
+    pub fn signed_volume(&self) -> f64 {
+        let mut props = ffi::GProp_GProps_ctor();
+        ffi::BRepGProp_VolumeProperties(&self.inner, props.pin_mut());
+        props.Mass()
+    }
+
+    /// A hollow solid with this shape's shells as its outside and `inner`'s as its cavity —
+    /// what a shelled solid is — built directly, without a boolean. `None` if either has
+    /// no shell or OCCT cannot orient the result.
+    pub fn hollow_around(&self, inner: &Shape) -> Option<Self> {
+        let out = ffi::MakeHollowSolid(&self.inner, &inner.inner);
+        (!out.is_null()).then(|| Self { inner: out })
+    }
+
+    /// The same shape with its orientation flipped: an inside-out solid made outward.
+    pub fn reversed(&self) -> Self {
+        Self { inner: ffi::TopoDS_Shape_Reversed(&self.inner) }
+    }
+
     /// Make a box with one corner at corner_1, and the opposite corner
     /// at corner_2.
     pub fn box_from_corners(corner_1: DVec3, corner_2: DVec3) -> Self {
