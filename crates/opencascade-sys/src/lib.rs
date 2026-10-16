@@ -1049,6 +1049,10 @@ pub mod ffi {
         pub fn Build(self: Pin<&mut BRepFilletAPI_MakeChamfer>, progress: &Message_ProgressRange);
         pub fn IsDone(self: &BRepFilletAPI_MakeChamfer) -> bool;
 
+        /// OCCT's signal handlers, process-wide: a memory fault inside the fillet and
+        /// chamfer `try_` wrappers then fails the call instead of the process.
+        pub fn occt_install_signal_handlers();
+
         // Safe fillet/chamfer wrappers (try-catch in C++)
         pub fn try_BRepFilletAPI_MakeFillet_Shape(
             fillet: Pin<&mut BRepFilletAPI_MakeFillet>,

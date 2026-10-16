@@ -16,6 +16,18 @@ use thiserror::Error;
 /// conversion someone can see.
 pub use glam;
 
+/// Installs OCCT's signal handlers, process-wide, once before any modelling.
+///
+/// OCCT can fault rather than throw — `BRepFilletAPI_MakeFillet::Build` segfaults on some
+/// radii just past what fits — and no `catch` stops a segfault. With these handlers in
+/// place, a fault inside [`primitives::Shape::try_fillet_edges`] or
+/// [`primitives::Shape::try_chamfer_edges`] returns `None` instead. Floating-point traps
+/// stay off. Replaces any SIGSEGV handler already installed, Rust's stack-overflow report
+/// among them.
+pub fn install_signal_handlers() {
+    opencascade_sys::ffi::occt_install_signal_handlers();
+}
+
 pub mod angle;
 pub mod bounding_box;
 pub mod kicad;

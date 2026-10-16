@@ -28,6 +28,8 @@
 #include <BRep_Builder.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <OSD.hxx>
+#include <Standard_ErrorHandler.hxx>
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
@@ -1010,10 +1012,19 @@ inline std::unique_ptr<TopoDS_Shape> try_MakeThickSolidBySimple(
   }
 }
 
+
+// Installs OCCT's signal handlers, process-wide, so that a memory fault inside an
+// OCC_CATCH_SIGNALS block is raised as an OSD_SIGSEGV exception the block's `catch`
+// takes, instead of killing the process. Floating-point traps stay off.
+inline void occt_install_signal_handlers() { OSD::SetSignal(Standard_False); }
+
 // Safe BRepFilletAPI_MakeFillet wrapper: builds, checks IsDone, returns null on any exception.
 inline std::unique_ptr<TopoDS_Shape> try_BRepFilletAPI_MakeFillet_Shape(
     BRepFilletAPI_MakeFillet &fillet) {
   try {
+    // A memory fault inside Build (OCCT segfaults on some radii just past what fits)
+    // becomes an OSD_SIGSEGV exception here, once occt_install_signal_handlers has run.
+    OCC_CATCH_SIGNALS
     fillet.Build(Message_ProgressRange());
     if (!fillet.IsDone()) return nullptr;
     return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(fillet.Shape()));
@@ -1026,6 +1037,7 @@ inline std::unique_ptr<TopoDS_Shape> try_BRepFilletAPI_MakeFillet_Shape(
 inline std::unique_ptr<TopoDS_Shape> try_BRepFilletAPI_MakeChamfer_Shape(
     BRepFilletAPI_MakeChamfer &chamfer) {
   try {
+    OCC_CATCH_SIGNALS
     chamfer.Build(Message_ProgressRange());
     if (!chamfer.IsDone()) return nullptr;
     return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(chamfer.Shape()));

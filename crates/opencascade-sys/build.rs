@@ -51,7 +51,9 @@ fn main() {
 
     let mut build = cxx_build::bridge("src/lib.rs");
 
-    if is_windows_gnu {
+    // OCC_CATCH_SIGNALS expands to nothing without it, and only MSVC catches signals
+    // another way (structured exceptions).
+    if !is_windows || is_windows_gnu {
         build.define("OCC_CONVERT_SIGNALS", "TRUE");
     }
 
