@@ -902,6 +902,12 @@ pub mod ffi {
         pub fn Shape(self: Pin<&mut BRepPrimAPI_MakeRevol>) -> &TopoDS_Shape;
         pub fn Build(self: Pin<&mut BRepPrimAPI_MakeRevol>, progress: &Message_ProgressRange);
         pub fn IsDone(self: &BRepPrimAPI_MakeRevol) -> bool;
+        /// The revolution, or null where OCCT cannot make one; never throws.
+        pub fn try_BRepPrimAPI_MakeRevol_Shape(
+            shape: &TopoDS_Shape,
+            axis: &gp_Ax1,
+            angle: f64,
+        ) -> UniquePtr<TopoDS_Shape>;
 
         #[rust_name = "add_edge"]
         pub fn Add(self: Pin<&mut BRepBuilderAPI_MakeWire>, edge: &TopoDS_Edge);

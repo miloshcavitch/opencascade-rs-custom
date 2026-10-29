@@ -201,6 +201,19 @@ impl Face {
         Solid::from_solid(solid)
     }
 
+    /// [`Face::revolve`], or `None` where OCCT cannot make the revolution (a face that
+    /// crosses the axis), instead of an exception that aborts the process.
+    pub fn try_revolve(&self, origin: DVec3, axis: DVec3, angle: Option<Angle>) -> Option<Solid> {
+        let revol_vec = make_axis_1(origin, axis);
+        let angle = angle.map(Angle::radians).unwrap_or(std::f64::consts::PI * 2.0);
+        let inner_shape = ffi::cast_face_to_shape(&self.inner);
+        let shape = ffi::try_BRepPrimAPI_MakeRevol_Shape(inner_shape, &revol_vec, angle);
+        if shape.is_null() {
+            return None;
+        }
+        Some(Solid::from_solid(ffi::TopoDS_cast_to_solid(&shape)))
+    }
+
     /// Fillets the face edges by a given radius at each vertex
     #[must_use]
     pub fn fillet(&self, radius: f64) -> Self {

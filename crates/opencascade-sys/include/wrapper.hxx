@@ -1018,6 +1018,23 @@ inline std::unique_ptr<TopoDS_Shape> try_MakeThickSolidBySimple(
 // takes, instead of killing the process. Floating-point traps stay off.
 inline void occt_install_signal_handlers() { OSD::SetSignal(Standard_False); }
 
+// A revolution, or null where OCCT cannot make one (a profile that crosses the axis):
+// reading `Shape()` from an unfinished BRepPrimAPI_MakeRevol throws StdFail_NotDone,
+// which aborted the process.
+inline std::unique_ptr<TopoDS_Shape> try_BRepPrimAPI_MakeRevol_Shape(const TopoDS_Shape &shape,
+                                                                    const gp_Ax1 &axis,
+                                                                    Standard_Real angle) {
+  try {
+    OCC_CATCH_SIGNALS
+    BRepPrimAPI_MakeRevol revol(shape, axis, angle, Standard_False);
+    revol.Build(Message_ProgressRange());
+    if (!revol.IsDone()) return nullptr;
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(revol.Shape()));
+  } catch (...) {
+    return nullptr;
+  }
+}
+
 // Safe BRepFilletAPI_MakeFillet wrapper: builds, checks IsDone, returns null on any exception.
 inline std::unique_ptr<TopoDS_Shape> try_BRepFilletAPI_MakeFillet_Shape(
     BRepFilletAPI_MakeFillet &fillet) {
